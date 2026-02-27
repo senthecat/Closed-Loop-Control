@@ -1,21 +1,52 @@
 #include <Arduino.h>
-#include <Servo.h>
-#include <Wire.h>
-#include <LIS3MDL.h>
-#include <LSM6.h>
+#include <ServoControl.h>
+#include <Interrupt.h>
 
-#include "calibration\Calibrate.cpp"
+Servo servo;
+ServoControl sc;
 
-// --------------- CONSTANTS -------------------
-enum Mode {
-  CALMAG,
-  RUN
-};
+const uint8_t leftButtonPin = x;
+const uint8_t rightButtonPin = x;
+
+volatile int currentOutput = 0;  // 0 = none, 1 = left, 2 = right, 3 = both
 
 void setup() {
-  Mode mode = CALMAG; // default to calibration mode
+  Serial.begin(115200);
+  ledTimerInit_1ms();
+
+  pinMode(leftButtonPin, INPUT_PULLUP);
+  pinMode(rightButtonPin, INPUT_PULLUP);
+
+  sc = ServoControl(servo);
+  sc.enter();
+
 }
 
 void loop() {
-  case ()
+  // Read buttons (LOW = pressed because of pullup)
+  bool leftPressed  = (digitalRead(leftButtonPin)  == LOW);
+  bool rightPressed = (digitalRead(rightButtonPin) == LOW);
+
+  int newOutput = 0;
+
+  if (leftPressed && rightPressed) {
+    newOutput = 3;
+  }
+  else if (leftPressed) {
+    newOutput = 1;
+  }
+  else if (rightPressed) {
+    newOutput = 2;
+  }
+  else {
+    newOutput = 0;
+  }
+
+  // Only update when state changes (prevents spam)
+  if (newOutput != currentOutput) {
+    currentOutput = newOutput;
+    Serial.println(currentOutput);
+    sc.update(currentOutput);
+  }
+  
 }
