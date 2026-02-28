@@ -5,8 +5,9 @@
 Servo servo;
 ServoControl sc;
 
-const uint8_t leftButtonPin = x;
-const uint8_t rightButtonPin = x;
+// the pin numbers are temporary pls change later
+const uint8_t leftButtonPin = 20;
+const uint8_t rightButtonPin = 21;
 
 volatile int currentOutput = 0;  // 0 = none, 1 = left, 2 = right, 3 = both
 
