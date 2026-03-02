@@ -5,12 +5,14 @@
 
 #define SERVO_PIN 3
 
-const uint8_t VALID_LOCATION = 0;
-const uint8_t CENTER_LOCATION = 1;
-const uint8_t RIGHT_LOCATION = 2;
-const uint8_t LEFT_LOCATION = 3;
 
-uint16_t heading = 1500;
+// probably move these all into one file for easier readability and less confusion
+const uint8_t VALID_LOCATION = 0;
+const uint8_t CENTER_LOCATION = 1 * sizeof(uint16_t);
+const uint8_t RIGHT_LOCATION = 2 * sizeof(uint16_t);
+const uint8_t LEFT_LOCATION = 3 * sizeof(uint16_t);
+
+uint16_t heading = 1500; // default as nominal center which should be 1500
 
 int16_t servo_center;
 int16_t servo_right_limit;
@@ -37,6 +39,7 @@ struct ServoControl{
     void enter() {
         servo.attach(SERVO_PIN);
 
+        // this is used to check if we need to force calibration
         EEPROM.get(VALID_LOCATION, valid);
 
         if (!valid) {   // invalid take measurements;
@@ -49,7 +52,7 @@ struct ServoControl{
         EEPROM.get(LEFT_LOCATION, servo_left_limit);
         EEPROM.get(RIGHT_LOCATION, servo_right_limit);
 
-        if (servo_center == -1) servo_center = heading;  // change this later to (nominal_center);
+        if (servo_center == 0) servo_center = heading; // servo_center empty
     };
     
     /**
@@ -72,21 +75,29 @@ struct ServoControl{
     boolean update(uint8_t button) {
         switch (state) {
             case P1:
-                if (servo_center != -1) {   // valid stored
-                    if (button == 1) 
+                if (button == 0) break; // fast break dont compute unnecesary things
+
+                if (servo_center != 0) {   // valid stored
+                    if (button == 1) {
                         clearLocation(CENTER_LOCATION);    // reset pressed
-                    else
+                        servo.writeMicroseconds(heading);
+                        servo_center = 0;
+                    } else if (button == 2) {
                         state = P2; // continue pressed next phase
+                        heading = servo_center;
+                    }
                 } else if (button == 1) {   // left
                     heading--;
-                    servo.write(heading);
+                    servo.writeMicroseconds(heading);
                 } else if (button == 2) {   // right
                     heading++;
-                    servo.write(heading);
-                } else {   // both pressed -> store -> nextstate
+                    servo.writeMicroseconds(heading);
+                } else if (button == 3) {   // both pressed -> store -> nextstate
                     EEPROM.put(CENTER_LOCATION, heading);
+
                     servo_center = heading;
                     state = P2;
+
                     ledSetBlink(50);    // blink rapidly
                     delay(500);
                     ledSetBlink(250);   // reset to normal blink rate
@@ -94,20 +105,29 @@ struct ServoControl{
 
                 break;
             case P2:
-                if (servo_left_limit != -1) {
-                    if (button == 1) 
+                if (button == 0) break;
+
+                if (servo_left_limit != 0) {
+                    if (button == 1) {
                         clearLocation(LEFT_LOCATION);
-                    else
+                        servo.writeMicroseconds(servo_center);  // move to center
+                        servo_left_limit = 0;
+                    } else if (button == 2) {
                         state = P3;
+                        heading = servo_center;
+                    }
                 } else if (button == 1) { // left 
                     heading -= 2;    // 2 because 1 is probably too slow can change later
-                    servo.write(heading);
+                    servo.writeMicroseconds(heading);
                 } else if (button == 2) { // right
                     heading += 2;
-                    servo.write(heading);
-                } else {
+                    servo.writeMicroseconds(heading);
+                } else if (button == 3) {
                     EEPROM.put(LEFT_LOCATION, heading);
+
                     servo_left_limit = heading;
+                    state = P3;
+
                     ledSetBlink(50); 
                     delay(500);
                     ledSetBlink(250);
@@ -115,20 +135,31 @@ struct ServoControl{
                 
                 break;
             case P3:
-                if (servo_right_limit != -1) {
-                    if (button == 1) 
+                if (button == 0) break;
+
+                if (servo_right_limit != 0) {
+                    if (button == 1) {
                         clearLocation(RIGHT_LOCATION);
-                    else
+                        servo.writeMicroseconds(servo_center);  // move to center
+                        servo_right_limit = 0;
+                    } else if (button == 2) {
                         state = RUN;
+                        heading = servo_center;
+                    }
                 } else if (button == 1) { // left 
                     heading -= 2;    // 2 because 1 is probably too slow can change later
-                    servo.write(heading);
+                    servo.writeMicroseconds(heading);
                 } else if (button == 2) { // right
                     heading += 2;
-                    servo.write(heading);
-                } else {
+                    servo.writeMicroseconds(heading);
+                } else if (button == 3) {
                     EEPROM.put(RIGHT_LOCATION, heading);
+                    EEPROM.put(VALID_LOCATION, true);
+                    valid = true;
+
                     servo_right_limit = heading;
+                    state = RUN;
+
                     ledSetBlink(50); 
                     delay(500);
                     ledSetBlink(250);
@@ -144,7 +175,7 @@ struct ServoControl{
      * Clears position at specific EEPROM location
      */
     boolean clearLocation(uint8_t idx) {
-        EEPROM.put(idx, -1);
+        EEPROM.put(idx, 0); // should be fine to write 0 since we are measuring ms and this should write false to valid
         valid = false;
     }
 
