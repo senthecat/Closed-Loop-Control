@@ -1,3 +1,6 @@
+#ifndef SERVOCONTROL_H
+#define SERVOCONTROL_H
+
 #include <Arduino.h>
 #include <EEPROM.h>
 #include <Servo.h>
@@ -138,6 +141,7 @@ struct ServoControl{
             case RUN:   // does nothing right now
                 break;
         }
+        return false;
     }
 
     /**
@@ -146,7 +150,10 @@ struct ServoControl{
     boolean clearLocation(uint8_t idx) {
         EEPROM.put(idx, -1);
         valid = false;
+        return true;
     }
 
     void exit();
 };
+
+#endif

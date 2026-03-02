@@ -1,3 +1,6 @@
+#ifndef INTERRUPT_H
+#define INTERRUPT_H
+
 #include <Arduino.h>
 
 enum LedMode : uint8_t { LED_OFF, LED_ON, LED_BLINK };
@@ -7,8 +10,8 @@ volatile uint16_t  g_blinkPeriodMs = 500;  // full toggle period
 volatile uint16_t  g_msCounter      = 0;
 volatile uint8_t   g_ledState       = 0;
 
-// --- 1 ms tick using Timer1 compare match A ---
-ISR(TIMER1_COMPA_vect) {
+// --- 1 ms tick using Timer2 compare match A (Timer1 is used by Servo) ---
+ISR(TIMER2_COMPA_vect) {
   if (g_ledMode == LED_BLINK) {
     g_msCounter++;
     if (g_msCounter >= g_blinkPeriodMs) {
@@ -27,15 +30,15 @@ void ledTimerInit_1ms() {
   digitalWrite(LED_BUILTIN, LOW);
 
   cli();                 // disable interrupts globally
-  TCCR1A = 0;
-  TCCR1B = 0;
-  TCNT1  = 0;
+  TCCR2A = 0;
+  TCCR2B = 0;
+  TCNT2  = 0;
 
   // 16 MHz / 64 = 250 kHz timer clock => 1 ms = 250 counts
-  OCR1A = 249;           // count 0..249 = 250 ticks = 1 ms
-  TCCR1B |= _BV(WGM12);  // CTC mode
-  TCCR1B |= _BV(CS11) | _BV(CS10);  // prescaler 64
-  TIMSK1 |= _BV(OCIE1A); // enable compare match A interrupt
+  OCR2A = 249;           // count 0..249 = 250 ticks = 1 ms
+  TCCR2A |= _BV(WGM21);  // CTC mode
+  TCCR2B |= _BV(CS22);   // prescaler 64
+  TIMSK2 |= _BV(OCIE2A); // enable compare match A interrupt
   sei();                 // enable interrupts globally
 }
 
@@ -64,3 +67,5 @@ void ledSetBlink(uint16_t periodMs) {
   sei();
   digitalWrite(LED_BUILTIN, LOW);
 }
+
+#endif

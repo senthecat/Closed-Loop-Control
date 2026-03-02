@@ -3,7 +3,7 @@
 #include <Interrupt.h>
 
 Servo servo;
-ServoControl sc;
+ServoControl sc(servo);
 
 // the pin numbers are temporary pls change later
 const uint8_t leftButtonPin = 20;
@@ -18,7 +18,6 @@ void setup() {
   pinMode(leftButtonPin, INPUT_PULLUP);
   pinMode(rightButtonPin, INPUT_PULLUP);
 
-  sc = ServoControl(servo);
   sc.enter();
 
 }
