@@ -1,6 +1,5 @@
 #include <Arduino.h>
 #include <ServoControl.h>
-#include <Interrupt.h>
 
 Servo servo;
 ServoControl sc(servo);
