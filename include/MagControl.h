@@ -21,7 +21,6 @@ boolean mag_valid;
 struct MagControl {
     private:
     enum State { IDLE, CAL, DONE } state;
-
     LIS3MDL::vector<int16_t> running_min;
     LIS3MDL::vector<int16_t> running_max;
     uint32_t last_change_ms;
@@ -43,6 +42,9 @@ struct MagControl {
     MagControl() : state{IDLE} {}
 
     void enter() {
+        Wire.begin();
+        delay(10);  // allow I2C bus to settle after init
+
         if (!mag.init()) {
             Serial.println(F("Failed to detect and initialize magnetometer."));
             while (1);
@@ -136,6 +138,8 @@ struct MagControl {
                 break;
         }
     }
+
+    bool isDone() const { return state == DONE; }
 
     void clearMag() {
         LIS3MDL::vector<int16_t> zero = {0, 0, 0};
