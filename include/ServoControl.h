@@ -174,7 +174,6 @@ struct ServoControl{
                 
                 break;
             case RUN:   // does nothing right now
-                servo.writeMicroseconds(servo_center);
                 break;
         }
     }
