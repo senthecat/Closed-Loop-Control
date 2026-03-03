@@ -45,9 +45,9 @@ struct ServoControl{
         valid = (magic == 0xA5);
 
         if (!valid) {   // invalid take measurements;
-            ledSetBlink(250);
+            ledSetBlink(250);   // fast blink, need to measure
         } else {
-            ledSetOn();
+            ledSetBlink(500);   // slow blink valid, but need to confirm
         }
 
         EEPROM.get(CENTER_LOCATION, servo_center);
