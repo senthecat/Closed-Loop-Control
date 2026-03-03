@@ -1,6 +1,9 @@
 #include <Arduino.h>
 #include <ServoControl.h>
 
+#define BTN_L   8
+#define BTN_R   9
+
 Servo servo;
 ServoControl sc(servo);
 
@@ -37,6 +40,9 @@ void clearAllCal() {
 void setup() {
   Serial.begin(115200);
   ledTimerInit_1ms();
+
+  pinMode(LED_PIN, OUTPUT);
+  digitalWrite(LED_PIN, HIGH);
 
   sc.enter();
 

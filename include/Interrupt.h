@@ -1,5 +1,7 @@
 #include <Arduino.h>
 
+#define LED_BUILTIN 10
+
 enum LedMode : uint8_t { LED_OFF, LED_ON, LED_BLINK };
 
 volatile LedMode   g_ledMode       = LED_OFF;
