@@ -29,10 +29,10 @@ const uint8_t MAX_TRIALS = 82;
 // ── Steering tuning parameters ──
 float Kp = 5.0;                // proportional gain
 float target_heading = 45.0;   // target heading in degrees (relative to tare)
-float heading_tolerance = 1.0; // tolerance in degrees
+float heading_tolerance = 2.0; // tolerance in degrees
 
 // ── Heading filter ──
-float gamma_filter = 0.75; // low-pass filter coefficient (0=raw, 1=fully smoothed)
+float gamma_filter = 0.80; // low-pass filter coefficient (0=raw, 1=fully smoothed)
 float filtered_heading = 0.0;
 
 // ── MAE tracking ──
