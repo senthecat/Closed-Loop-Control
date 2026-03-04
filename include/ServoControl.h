@@ -178,7 +178,6 @@ struct ServoControl{
                 break;
         }
     }
-
     /**
      * Clears position at specific EEPROM location
      */

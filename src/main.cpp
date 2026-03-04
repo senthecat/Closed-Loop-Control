@@ -1,13 +1,21 @@
 #include <Arduino.h>
 #include <Wire.h>
+#include <EEPROM.h>
 #include <LIS3MDL.h>
 #include <ServoControl.h>
 
 #define BTN_L   8
 #define BTN_R   9
 
+// Mag calibration EEPROM layout (servo data ends at byte 7)
+const uint8_t MAG_VALID_LOCATION    = 7;
+const uint8_t MAG_OFFSET_X_LOCATION = MAG_VALID_LOCATION    + sizeof(uint8_t);
+const uint8_t MAG_OFFSET_Y_LOCATION = MAG_OFFSET_X_LOCATION + sizeof(float);
+const uint8_t MAG_RANGE_X_LOCATION  = MAG_OFFSET_Y_LOCATION + sizeof(float);
+const uint8_t MAG_RANGE_Y_LOCATION  = MAG_RANGE_X_LOCATION  + sizeof(float);
+
 // ── Steering tuning parameters ──
-float Kp                = 2.0;    // proportional gain
+float Kp                = 5.0;    // proportional gain
 float target_heading    = 45.0;   // target heading in degrees (relative to tare)
 float heading_tolerance = 2.0;    // tolerance in degrees
 
@@ -37,7 +45,7 @@ void printHelp() {
   Serial.println(F("  s  - print status"));
   Serial.println(F("  x  - clear all EEPROM cal data"));
   Serial.println(F("-- Mag calibration --"));
-  Serial.println(F("  m  - start mag calibration (rotate slowly 360)"));
+  Serial.println(F("  m  - reset & start mag calibration (rotate slowly 360)"));
   Serial.println(F("  d  - stop mag calibration & compute offsets"));
   Serial.println(F("-- Heading --"));
   Serial.println(F("  a  - stream heading angle (any key to stop)"));
@@ -75,10 +83,13 @@ void clearAllCal() {
 // ── Magnetometer calibration ──
 
 void magStartCollecting() {
+  // Clear any saved mag calibration from EEPROM
+  EEPROM.put(MAG_VALID_LOCATION, (uint8_t)0x00);
+  mag_calibrated = false;
   mag_collecting = true;
   mag_min_x =  32767;  mag_max_x = -32768;
   mag_min_y =  32767;  mag_max_y = -32768;
-  Serial.println(F("Mag calibration started. Rotate sensor slowly through full 360."));
+  Serial.println(F("Mag cal reset. Rotate sensor slowly through full 360."));
   Serial.println(F("Send 'd' when done."));
 }
 
@@ -97,7 +108,14 @@ void magStopCollecting() {
   offset_y = (mag_max_y + mag_min_y) / 2.0;
   mag_calibrated = true;
 
-  Serial.println(F("Mag calibration complete:"));
+  // Save to EEPROM
+  EEPROM.put(MAG_OFFSET_X_LOCATION, offset_x);
+  EEPROM.put(MAG_OFFSET_Y_LOCATION, offset_y);
+  EEPROM.put(MAG_RANGE_X_LOCATION,  range_x);
+  EEPROM.put(MAG_RANGE_Y_LOCATION,  range_y);
+  EEPROM.put(MAG_VALID_LOCATION,    (uint8_t)0xB6);
+
+  Serial.println(F("Mag calibration complete (saved to EEPROM):"));
   Serial.print(F("  offset_x = ")); Serial.println(offset_x);
   Serial.print(F("  offset_y = ")); Serial.println(offset_y);
   Serial.print(F("  range_x  = ")); Serial.println(range_x);
@@ -153,6 +171,8 @@ void steerUpdate() {
   float current = magHeading();
   float error   = target_heading - current;
 
+  Serial.print(error);
+
   // wrap error to -180..+180
   if (error >  180.0) error -= 360.0;
   if (error < -180.0) error += 360.0;
@@ -167,7 +187,11 @@ void steerUpdate() {
   float output = Kp * error;
 
   // map output to servo microseconds from center
-  int16_t servo_cmd = servo_center + (int16_t)output;
+  int16_t servo_cmd;
+  servo_cmd = servo_center - (int16_t)output;
+  
+  Serial.print(F("  "));
+  Serial.print(servo_cmd);
 
   // clamp to calibrated servo limits
   if (servo_cmd < servo_left_limit && servo_left_limit < servo_center)
@@ -179,6 +203,10 @@ void steerUpdate() {
     servo_cmd = servo_right_limit;
   else if (servo_cmd > servo_center + 200)
     servo_cmd = servo_center + 200;
+
+  Serial.print(F("  "));
+  Serial.print(servo_cmd);
+  Serial.println();
 
   servo.writeMicroseconds(servo_cmd);
 }
@@ -198,6 +226,18 @@ void setup() {
   ledTimerInit_1ms();
 
   sc.enter();
+
+  // Load mag calibration from EEPROM if previously saved
+  uint8_t mag_magic;
+  EEPROM.get(MAG_VALID_LOCATION, mag_magic);
+  if (mag_magic == 0xB6) {
+    EEPROM.get(MAG_OFFSET_X_LOCATION, offset_x);
+    EEPROM.get(MAG_OFFSET_Y_LOCATION, offset_y);
+    EEPROM.get(MAG_RANGE_X_LOCATION,  range_x);
+    EEPROM.get(MAG_RANGE_Y_LOCATION,  range_y);
+    mag_calibrated = true;
+    Serial.println(F("Mag calibration loaded from EEPROM."));
+  }
 
   printHelp();
   printStatus();
