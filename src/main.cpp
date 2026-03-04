@@ -6,15 +6,18 @@
 
 #define BTN_L            8
 #define BTN_R            9
+#define LIMIT_PIN        4
 #define SOLENOID_PIN     2
 #define DEBOUNCE_MS     75
-#define PULSE_MS        50
-#define FIRE_INTERVAL_MS 500
+#define LIMIT_DEBOUNCE   2
+#define PULSE_MS         50
+#define FIRE_INTERVAL_MS 200
+#define FIRE_TEST_MS    1000  // observation window for single-fire test (ms)
 
 // ── Steering tuning parameters ──
-float Kp                = 5.0f;
-float target_heading    = 45.0f;
-float heading_tolerance = 1.0f;
+float Kp                = 5.0;    // proportional gain
+float target_heading    = 45.0;   // target heading in degrees (relative to tare)
+float heading_tolerance = 2.0;    // tolerance in degrees
 
 Servo        servo;
 ServoControl sc(servo);
@@ -34,7 +37,16 @@ unsigned long btnL_debounce = 0;
 bool          btnR_raw = HIGH, btnR_stable = HIGH;
 unsigned long btnR_debounce = 0;
 
-// Serial buffer for numeric entry (heading or Kp)
+// Limit switch debounce state (GPIO 4)
+bool          limitRaw = HIGH, limitStable = HIGH;
+unsigned long limitDebounce = 0;
+
+// Single-fire test state
+bool          firing    = false;
+unsigned long fireStart = 0;
+int           limitCount = 0;
+
+// Serial buffer for numeric entry
 char    serialBuf[16];
 uint8_t serialBufIdx    = 0;
 bool    serialSettingKp = false;
@@ -56,6 +68,7 @@ void printHelp() {
   Serial.println(F("  a      - stream heading angle (any key to stop)"));
   Serial.println(F("  t      - tare heading to zero"));
   Serial.println(F("-- Steering --"));
+  Serial.println(F("  f      - fire solenoid once, count limit switch triggers (2 s)"));
   Serial.println(F("  g      - start Kp steering toward target"));
   Serial.println(F("  p      - stop steering"));
   Serial.println(F("  <num>  - set new target heading (e.g. 90.5)"));
@@ -159,6 +172,8 @@ void setup() {
     Serial.println(F("Steering params loaded from EEPROM."));
   }
 
+  pinMode(LIMIT_PIN, INPUT_PULLUP);
+
   printHelp();
   printStatus();
 }
@@ -185,8 +200,16 @@ void loop() {
     if (btnR_stable == LOW) btnR_pressed = true;
   }
 
-  // GPIO 8 → tare heading
-  if (btnL_pressed && mc.isCalibrated()) mc.tare();
+  // Limit switch debounce (GPIO 4) — count triggers during firing test
+  reading = digitalRead(LIMIT_PIN);
+  if (reading != limitRaw) { limitRaw = reading; limitDebounce = now; }
+  if ((now - limitDebounce) >= LIMIT_DEBOUNCE && reading != limitStable) {
+    limitStable = reading;
+    if (limitStable == LOW && (firing || steering)) limitCount++;
+  }
+
+  // GPIO 8 → tare
+  if (btnL_pressed) mc.tare();
 
   // GPIO 9 → toggle steering + solenoid
   if (btnR_pressed) {
@@ -196,8 +219,9 @@ void loop() {
       } else if (!valid) {
         Serial.println(F("Servo not calibrated."));
       } else {
-        steering  = true;
-        solPulsed = false;
+        steering   = true;
+        solPulsed  = false;
+        limitCount = 0;
         Serial.print(F("Steering ON. Target="));
         Serial.println(target_heading);
       }
@@ -206,7 +230,10 @@ void loop() {
       digitalWrite(SOLENOID_PIN, LOW);
       solPulsed = false;
       servo.writeMicroseconds(servo_center);
-      Serial.println(F("Steering stopped."));
+      Serial.print(F("Steering stopped. | Limit switch triggers: "));
+      Serial.print(limitCount);
+      Serial.print("  Distance (in): ");
+      Serial.println((double)limitCount * 1.16);
     }
   }
 
@@ -247,13 +274,29 @@ void loop() {
         digitalWrite(SOLENOID_PIN, LOW);
         solPulsed = false;
         servo.writeMicroseconds(servo_center);
-        Serial.println(F("Steering stopped."));
+        Serial.print(F("Steering stopped. | Limit switch triggers: "));
+        Serial.print(limitCount);
+        Serial.print("  Distance (in): ");
+        Serial.println((double)limitCount * 1.16);
       }
     }
     return;
   }
 
-  // ── Serial command handler ──
+  // ── Single-fire test ──
+  if (firing) {
+    if (now - fireStart >= PULSE_MS)      digitalWrite(SOLENOID_PIN, LOW);
+    if (now - fireStart >= FIRE_TEST_MS) {
+      firing = false;
+      digitalWrite(SOLENOID_PIN, LOW);
+      Serial.print(F("Fire complete | Limit switch triggers: "));
+      Serial.print(limitCount);
+      Serial.print("  Distance (in): ");
+      Serial.println((double)limitCount * 1.16);
+    }
+    return;  // ignore all input during the 2-second window
+  }
+
   if (!Serial.available()) return;
 
   char c = Serial.read();
@@ -311,11 +354,24 @@ void loop() {
         mc.tare();
       }
       return;
-    case 'g':
-      if (!mc.isCalibrated()) { Serial.println(F("Mag not calibrated first."));  return; }
-      if (!valid)              { Serial.println(F("Servo not calibrated first.")); return; }
-      steering  = true;
-      solPulsed = false;
+    case 'f': // single-fire test
+      firing     = true;
+      limitCount = 0;
+      fireStart  = now;
+      digitalWrite(SOLENOID_PIN, HIGH);
+      Serial.println(F("Fired. Counting limit switch triggers for 1 s..."));
+      return;
+    case 'g': // start steering
+      if (!mc.isCalibrated()) {
+        Serial.println(F("Mag not calibrated first."));
+        return;
+      }
+      if (!valid) {
+        Serial.println(F("Servo not calibrated first."));
+        return;
+      }
+      steering   = true;
+      limitCount = 0;
       Serial.print(F("Steering ON. Target="));
       Serial.print(target_heading);
       Serial.print(F(" Tol="));
