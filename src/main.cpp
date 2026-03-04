@@ -7,8 +7,8 @@
 #define BTN_L            8
 #define BTN_R            9
 #define SOLENOID_PIN     2
-#define DEBOUNCE_MS     50
-#define PULSE_MS       100
+#define DEBOUNCE_MS     75
+#define PULSE_MS       50
 #define FIRE_INTERVAL_MS 500
 
 // Mag calibration EEPROM layout (servo data ends at byte 7)
@@ -18,10 +18,15 @@ const uint8_t MAG_OFFSET_Y_LOCATION = MAG_OFFSET_X_LOCATION + sizeof(float);
 const uint8_t MAG_RANGE_X_LOCATION  = MAG_OFFSET_Y_LOCATION + sizeof(float);
 const uint8_t MAG_RANGE_Y_LOCATION  = MAG_RANGE_X_LOCATION  + sizeof(float);
 
+// Steering params EEPROM layout (after mag data)
+const uint8_t STEER_VALID_LOCATION   = MAG_RANGE_Y_LOCATION  + sizeof(float);
+const uint8_t KP_LOCATION            = STEER_VALID_LOCATION  + sizeof(uint8_t);
+const uint8_t HEADING_LOCATION       = KP_LOCATION           + sizeof(float);
+
 // ── Steering tuning parameters ──
 float Kp                = 5.0;    // proportional gain
 float target_heading    = 45.0;   // target heading in degrees (relative to tare)
-float heading_tolerance = 2.0;    // tolerance in degrees
+float heading_tolerance = 1.0;    // tolerance in degrees
 
 Servo servo;
 ServoControl sc(servo);
@@ -50,9 +55,10 @@ unsigned long btnL_debounce = 0;
 bool          btnR_raw = HIGH, btnR_stable = HIGH;
 unsigned long btnR_debounce = 0;
 
-// Serial buffer for heading entry
+// Serial buffer for numeric entry
 char    serialBuf[16];
 uint8_t serialBufIdx = 0;
+bool    serialSettingKp = false;
 
 void printHelp() {
   Serial.println(F("=== Commands ==="));
@@ -72,6 +78,7 @@ void printHelp() {
   Serial.println(F("  g      - start Kp steering toward target"));
   Serial.println(F("  p      - stop steering"));
   Serial.println(F("  <num>  - set new target heading (e.g. 90.5)"));
+  Serial.println(F("  k      - set Kp gain (then type value + enter)"));
   Serial.println(F("-- Buttons --"));
   Serial.println(F("  GPIO 8 - tare heading"));
   Serial.println(F("  GPIO 9 - toggle steering on/off"));
@@ -98,7 +105,9 @@ void clearAllCal() {
   sc.clearLocation(CENTER_LOCATION);
   sc.clearLocation(LEFT_LOCATION);
   sc.clearLocation(RIGHT_LOCATION);
-  EEPROM.put(VALID_LOCATION, false);
+  EEPROM.put(VALID_LOCATION,       false);
+  EEPROM.put(MAG_VALID_LOCATION,   (uint8_t)0x00);
+  EEPROM.put(STEER_VALID_LOCATION, (uint8_t)0x00);
   Serial.println(F("EEPROM cleared. Reset board to restart calibration."));
 }
 
@@ -193,6 +202,8 @@ void steerUpdate() {
   float current = magHeading();
   float error   = target_heading - current;
 
+  Serial.print(current);
+  Serial.print(F("  "));
   Serial.print(error);
 
   // wrap error to -180..+180
@@ -264,6 +275,15 @@ void setup() {
     EEPROM.get(MAG_RANGE_Y_LOCATION,  range_y);
     mag_calibrated = true;
     Serial.println(F("Mag calibration loaded from EEPROM."));
+  }
+
+  // Load steering params from EEPROM if previously saved
+  uint8_t steer_magic;
+  EEPROM.get(STEER_VALID_LOCATION, steer_magic);
+  if (steer_magic == 0xC4) {
+    EEPROM.get(KP_LOCATION,      Kp);
+    EEPROM.get(HEADING_LOCATION, target_heading);
+    Serial.println(F("Steering params loaded from EEPROM."));
   }
 
   printHelp();
@@ -373,12 +393,25 @@ void loop() {
   if ((c == '\n' || c == '\r') && serialBufIdx > 0) {
     serialBuf[serialBufIdx] = '\0';
     serialBufIdx = 0;
-    target_heading = atof(serialBuf);
-    Serial.print(F("Target heading set to: "));
-    Serial.println(target_heading);
+    float val = atof(serialBuf);
+    if (serialSettingKp) {
+      serialSettingKp = false;
+      Kp = val;
+      EEPROM.put(KP_LOCATION,         Kp);
+      EEPROM.put(STEER_VALID_LOCATION, (uint8_t)0xC4);
+      Serial.print(F("Kp set to: "));
+      Serial.println(Kp);
+    } else {
+      target_heading = val;
+      EEPROM.put(HEADING_LOCATION,    target_heading);
+      EEPROM.put(STEER_VALID_LOCATION, (uint8_t)0xC4);
+      Serial.print(F("Target heading set to: "));
+      Serial.println(target_heading);
+    }
     return;
   }
   serialBufIdx = 0; // clear buffer on any command letter
+  serialSettingKp = false;
 
   uint8_t button = 0;
 
@@ -425,6 +458,12 @@ void loop() {
       return;
     case 'p':
       Serial.println(F("Steering already off."));
+      return;
+    case 'k':
+      serialSettingKp = true;
+      Serial.print(F("Current Kp="));
+      Serial.print(Kp);
+      Serial.println(F(". Enter new value:"));
       return;
     case 'h': printHelp(); return;
     case '\n':
