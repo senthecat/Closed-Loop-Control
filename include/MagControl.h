@@ -8,24 +8,25 @@
 struct MagControl {
 private:
     LIS3MDL _mag;
-    LIS3MDL::vector<int16_t> _mag_min;
-    LIS3MDL::vector<int16_t> _mag_max;
-    LIS3MDL::vector<int16_t> _running_min;
-    LIS3MDL::vector<int16_t> _running_max;
+
+    // Calibration data (stored in EEPROM)
+    float _offset_x, _offset_y;
+    float _range_x,  _range_y;
+
+    // Running min/max used only during active calibration
+    int16_t _min_x, _max_x;
+    int16_t _min_y, _max_y;
+
     bool  _calibrated;
     bool  _collecting;
     float _tare_offset;
 
     float _calibratedX() {
-        float range = _mag_max.x - _mag_min.x;
-        if (range == 0) return 0;
-        return (_mag.m.x - (_mag_max.x + _mag_min.x) / 2.0f) / (range / 2.0f);
+        return (_mag.m.x - _offset_x) / (_range_x / 2.0f);
     }
 
     float _calibratedY() {
-        float range = _mag_max.y - _mag_min.y;
-        if (range == 0) return 0;
-        return (_mag.m.y - (_mag_max.y + _mag_min.y) / 2.0f) / (range / 2.0f);
+        return (_mag.m.y - _offset_y) / (_range_y / 2.0f);
     }
 
 public:
@@ -47,9 +48,11 @@ public:
 
         uint8_t magic;
         EEPROM.get(MAG_VALID_LOCATION, magic);
-        if (magic == 0xA5) {
-            EEPROM.get(MAG_MIN_LOCATION, _mag_min);
-            EEPROM.get(MAG_MAX_LOCATION, _mag_max);
+        if (magic == 0xB6) {
+            EEPROM.get(MAG_OFFSET_X_LOCATION, _offset_x);
+            EEPROM.get(MAG_OFFSET_Y_LOCATION, _offset_y);
+            EEPROM.get(MAG_RANGE_X_LOCATION,  _range_x);
+            EEPROM.get(MAG_RANGE_Y_LOCATION,  _range_y);
             _calibrated = true;
             Serial.println(F("Mag calibration loaded from EEPROM."));
         } else {
@@ -65,12 +68,10 @@ public:
         _mag.read();
         if (!_collecting) return;
 
-        if (_mag.m.x < _running_min.x) _running_min.x = _mag.m.x;
-        if (_mag.m.y < _running_min.y) _running_min.y = _mag.m.y;
-        if (_mag.m.z < _running_min.z) _running_min.z = _mag.m.z;
-        if (_mag.m.x > _running_max.x) _running_max.x = _mag.m.x;
-        if (_mag.m.y > _running_max.y) _running_max.y = _mag.m.y;
-        if (_mag.m.z > _running_max.z) _running_max.z = _mag.m.z;
+        if (_mag.m.x < _min_x) _min_x = _mag.m.x;
+        if (_mag.m.x > _max_x) _max_x = _mag.m.x;
+        if (_mag.m.y < _min_y) _min_y = _mag.m.y;
+        if (_mag.m.y > _max_y) _max_y = _mag.m.y;
     }
 
     /**
@@ -78,47 +79,56 @@ public:
      * Triggered by serial command 'm'.
      */
     void startCal() {
-        _running_min = { 32767,  32767,  32767};
-        _running_max = {-32768, -32768, -32768};
-        _collecting  = true;
+        _min_x =  32767;  _max_x = -32768;
+        _min_y =  32767;  _max_y = -32768;
+        _collecting = true;
         Serial.println(F("Mag cal started. Rotate sensor slowly through 360 deg."));
         Serial.println(F("Send 'd' when done."));
     }
 
     /**
-     * Stops collection, validates the data, and saves to EEPROM.
+     * Stops collection, computes offset/range, and saves to EEPROM.
      * Triggered by serial command 'd'.
      */
     void finishCal() {
         _collecting = false;
 
-        if (_running_max.x == _running_min.x || _running_max.y == _running_min.y) {
+        float range_x = _max_x - _min_x;
+        float range_y = _max_y - _min_y;
+
+        if (range_x == 0 || range_y == 0) {
             Serial.println(F("Cal failed: no variation detected. Try again."));
             return;
         }
 
-        _mag_min = _running_min;
-        _mag_max = _running_max;
-        EEPROM.put(MAG_MIN_LOCATION,   _mag_min);
-        EEPROM.put(MAG_MAX_LOCATION,   _mag_max);
-        EEPROM.put(MAG_VALID_LOCATION, (uint8_t)0xA5);
+        _offset_x = (_max_x + _min_x) / 2.0f;
+        _offset_y = (_max_y + _min_y) / 2.0f;
+        _range_x  = range_x;
+        _range_y  = range_y;
+
+        EEPROM.put(MAG_OFFSET_X_LOCATION, _offset_x);
+        EEPROM.put(MAG_OFFSET_Y_LOCATION, _offset_y);
+        EEPROM.put(MAG_RANGE_X_LOCATION,  _range_x);
+        EEPROM.put(MAG_RANGE_Y_LOCATION,  _range_y);
+        EEPROM.put(MAG_VALID_LOCATION,    (uint8_t)0xB6);
         _calibrated = true;
 
-        Serial.println(F("Mag calibration saved."));
-        Serial.print(F("  min: x=")); Serial.print(_mag_min.x);
-        Serial.print(F(" y="));       Serial.println(_mag_min.y);
-        Serial.print(F("  max: x=")); Serial.print(_mag_max.x);
-        Serial.print(F(" y="));       Serial.println(_mag_max.y);
+        Serial.println(F("Mag calibration saved:"));
+        Serial.print(F("  offset_x = ")); Serial.println(_offset_x);
+        Serial.print(F("  offset_y = ")); Serial.println(_offset_y);
+        Serial.print(F("  range_x  = ")); Serial.println(_range_x);
+        Serial.print(F("  range_y  = ")); Serial.println(_range_y);
     }
 
     /**
      * Clears magnetometer calibration from EEPROM.
      */
     void clearCal() {
-        LIS3MDL::vector<int16_t> zero = {0, 0, 0};
-        EEPROM.put(MAG_MIN_LOCATION,   zero);
-        EEPROM.put(MAG_MAX_LOCATION,   zero);
-        EEPROM.put(MAG_VALID_LOCATION, (uint8_t)0x00);
+        EEPROM.put(MAG_OFFSET_X_LOCATION, 0.0f);
+        EEPROM.put(MAG_OFFSET_Y_LOCATION, 0.0f);
+        EEPROM.put(MAG_RANGE_X_LOCATION,  0.0f);
+        EEPROM.put(MAG_RANGE_Y_LOCATION,  0.0f);
+        EEPROM.put(MAG_VALID_LOCATION,    (uint8_t)0x00);
         _calibrated = false;
     }
 
