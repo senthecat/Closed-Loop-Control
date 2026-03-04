@@ -4,8 +4,12 @@
 #include <LIS3MDL.h>
 #include <ServoControl.h>
 
-#define BTN_L   8
-#define BTN_R   9
+#define BTN_L            8
+#define BTN_R            9
+#define SOLENOID_PIN     2
+#define DEBOUNCE_MS     50
+#define PULSE_MS       100
+#define FIRE_INTERVAL_MS 500
 
 // Mag calibration EEPROM layout (servo data ends at byte 7)
 const uint8_t MAG_VALID_LOCATION    = 7;
@@ -36,6 +40,20 @@ float tare_offset   = 0.0;  // heading at tare time (degrees)
 bool  streaming     = false; // live heading stream active
 bool  steering      = false; // Kp steering loop active
 
+// Solenoid state
+unsigned long solTimer  = 0;
+bool          solPulsed = false;
+
+// Button debounce state
+bool          btnL_raw = HIGH, btnL_stable = HIGH;
+unsigned long btnL_debounce = 0;
+bool          btnR_raw = HIGH, btnR_stable = HIGH;
+unsigned long btnR_debounce = 0;
+
+// Serial buffer for heading entry
+char    serialBuf[16];
+uint8_t serialBufIdx = 0;
+
 void printHelp() {
   Serial.println(F("=== Commands ==="));
   Serial.println(F("-- Servo calibration --"));
@@ -51,9 +69,13 @@ void printHelp() {
   Serial.println(F("  a  - stream heading angle (any key to stop)"));
   Serial.println(F("  t  - tare heading to zero"));
   Serial.println(F("-- Steering --"));
-  Serial.println(F("  g  - start Kp steering toward target"));
-  Serial.println(F("  p  - stop steering"));
-  Serial.println(F("  h  - print this help"));
+  Serial.println(F("  g      - start Kp steering toward target"));
+  Serial.println(F("  p      - stop steering"));
+  Serial.println(F("  <num>  - set new target heading (e.g. 90.5)"));
+  Serial.println(F("-- Buttons --"));
+  Serial.println(F("  GPIO 8 - tare heading"));
+  Serial.println(F("  GPIO 9 - toggle steering on/off"));
+  Serial.println(F("  h      - print this help"));
   Serial.println();
 }
 
@@ -223,6 +245,11 @@ void setup() {
   }
   mag.enableDefault();
 
+  pinMode(SOLENOID_PIN, OUTPUT);
+  digitalWrite(SOLENOID_PIN, LOW);
+  pinMode(BTN_L, INPUT_PULLUP);
+  pinMode(BTN_R, INPUT_PULLUP);
+
   ledTimerInit_1ms();
 
   sc.enter();
@@ -244,6 +271,52 @@ void setup() {
 }
 
 void loop() {
+  unsigned long now = millis();
+
+  // ── Button debounce ──
+  bool reading;
+
+  reading = digitalRead(BTN_L);
+  if (reading != btnL_raw) { btnL_raw = reading; btnL_debounce = now; }
+  bool btnL_pressed = false;
+  if ((now - btnL_debounce) >= DEBOUNCE_MS && reading != btnL_stable) {
+    btnL_stable = reading;
+    if (btnL_stable == LOW) btnL_pressed = true;
+  }
+
+  reading = digitalRead(BTN_R);
+  if (reading != btnR_raw) { btnR_raw = reading; btnR_debounce = now; }
+  bool btnR_pressed = false;
+  if ((now - btnR_debounce) >= DEBOUNCE_MS && reading != btnR_stable) {
+    btnR_stable = reading;
+    if (btnR_stable == LOW) btnR_pressed = true;
+  }
+
+  // GPIO 8 → tare
+  if (btnL_pressed && mag_calibrated) tareHeading();
+
+  // GPIO 9 → toggle steering
+  if (btnR_pressed) {
+    if (!steering) {
+      if (!mag_calibrated) {
+        Serial.println(F("Mag not calibrated."));
+      } else if (!valid) {
+        Serial.println(F("Servo not calibrated."));
+      } else {
+        steering = true;
+        solPulsed = false;
+        Serial.print(F("Steering ON. Target="));
+        Serial.println(target_heading);
+      }
+    } else {
+      steering = false;
+      digitalWrite(SOLENOID_PIN, LOW);
+      solPulsed = false;
+      servo.writeMicroseconds(servo_center);
+      Serial.println(F("Steering stopped."));
+    }
+  }
+
   magUpdate();
 
   // Live heading stream mode
@@ -263,6 +336,15 @@ void loop() {
 
   // Kp steering loop
   if (steering) {
+    // Solenoid firing (non-blocking)
+    if (!solPulsed) {
+      digitalWrite(SOLENOID_PIN, HIGH);
+      solPulsed = true;
+      solTimer = now;
+    }
+    if (now - solTimer >= PULSE_MS)        digitalWrite(SOLENOID_PIN, LOW);
+    if (now - solTimer >= FIRE_INTERVAL_MS) solPulsed = false;
+
     steerUpdate();
     delay(20); // 50 Hz control loop
     // check for stop command
@@ -270,6 +352,8 @@ void loop() {
       char c = Serial.read();
       if (c == 'p') {
         steering = false;
+        digitalWrite(SOLENOID_PIN, LOW);
+        solPulsed = false;
         servo.writeMicroseconds(servo_center);
         Serial.println(F("Steering stopped."));
       }
@@ -280,6 +364,22 @@ void loop() {
   if (!Serial.available()) return;
 
   char c = Serial.read();
+
+  // Numeric input → set target heading
+  if (c == '-' || c == '.' || isdigit((unsigned char)c)) {
+    if (serialBufIdx < sizeof(serialBuf) - 1) serialBuf[serialBufIdx++] = c;
+    return;
+  }
+  if ((c == '\n' || c == '\r') && serialBufIdx > 0) {
+    serialBuf[serialBufIdx] = '\0';
+    serialBufIdx = 0;
+    target_heading = atof(serialBuf);
+    Serial.print(F("Target heading set to: "));
+    Serial.println(target_heading);
+    return;
+  }
+  serialBufIdx = 0; // clear buffer on any command letter
+
   uint8_t button = 0;
 
   switch (c) {
