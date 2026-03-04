@@ -6,10 +6,7 @@
 
 #define BTN_L            8
 #define BTN_R            9
-#define SOLENOID_PIN     2
 #define DEBOUNCE_MS     75
-#define PULSE_MS       50
-#define FIRE_INTERVAL_MS 500
 
 // Mag calibration EEPROM layout (servo data ends at byte 7)
 const uint8_t MAG_VALID_LOCATION    = 7;
@@ -23,10 +20,24 @@ const uint8_t STEER_VALID_LOCATION   = MAG_RANGE_Y_LOCATION  + sizeof(float);
 const uint8_t KP_LOCATION            = STEER_VALID_LOCATION  + sizeof(uint8_t);
 const uint8_t HEADING_LOCATION       = KP_LOCATION           + sizeof(float);
 
+// Trial log EEPROM layout (after steering params)
+const uint8_t TRIAL_COUNT_LOCATION   = HEADING_LOCATION      + sizeof(float);  // byte 33
+const uint8_t TRIAL_DATA_START       = TRIAL_COUNT_LOCATION  + sizeof(uint8_t); // byte 34
+const uint8_t TRIAL_ROW_SIZE         = 3 * sizeof(float);  // 12 bytes: Kp, heading, MAE
+const uint8_t MAX_TRIALS             = 82;
+
 // ── Steering tuning parameters ──
 float Kp                = 5.0;    // proportional gain
 float target_heading    = 45.0;   // target heading in degrees (relative to tare)
 float heading_tolerance = 1.0;    // tolerance in degrees
+
+// ── Heading filter ──
+float gamma_filter      = 0.75;   // low-pass filter coefficient (0=raw, 1=fully smoothed)
+float filtered_heading  = 0.0;
+
+// ── MAE tracking ──
+float         errorSum    = 0.0;
+unsigned long sampleCount = 0;
 
 Servo servo;
 ServoControl sc(servo);
@@ -44,10 +55,6 @@ float range_x, range_y;
 float tare_offset   = 0.0;  // heading at tare time (degrees)
 bool  streaming     = false; // live heading stream active
 bool  steering      = false; // Kp steering loop active
-
-// Solenoid state
-unsigned long solTimer  = 0;
-bool          solPulsed = false;
 
 // Button debounce state
 bool          btnL_raw = HIGH, btnL_stable = HIGH;
@@ -76,9 +83,13 @@ void printHelp() {
   Serial.println(F("  t  - tare heading to zero"));
   Serial.println(F("-- Steering --"));
   Serial.println(F("  g      - start Kp steering toward target"));
-  Serial.println(F("  p      - stop steering"));
+  Serial.println(F("  p      - stop steering (prints MAE, saves trial)"));
   Serial.println(F("  <num>  - set new target heading (e.g. 90.5)"));
   Serial.println(F("  k      - set Kp gain (then type value + enter)"));
+  Serial.println(F("  (heading filtered with gamma=0.75 low-pass)"));
+  Serial.println(F("-- Trial log --"));
+  Serial.println(F("  w  - dump all trials as CSV (Kp, heading, MAE)"));
+  Serial.println(F("  c  - clear trial log"));
   Serial.println(F("-- Buttons --"));
   Serial.println(F("  GPIO 8 - tare heading"));
   Serial.println(F("  GPIO 9 - toggle steering on/off"));
@@ -196,19 +207,88 @@ void tareHeading() {
   Serial.println(F("Heading tared to 0."));
 }
 
+// ── Trial log helpers ──
+
+void saveTrialToEEPROM(float mae) {
+  uint8_t count;
+  EEPROM.get(TRIAL_COUNT_LOCATION, count);
+  if (count >= MAX_TRIALS) {
+    Serial.println(F("Trial log full (82 max). Send 'c' to clear."));
+    return;
+  }
+  uint16_t addr = TRIAL_DATA_START + (uint16_t)count * TRIAL_ROW_SIZE;
+  EEPROM.put(addr,                    Kp);
+  EEPROM.put(addr + sizeof(float),    target_heading);
+  EEPROM.put(addr + 2 * sizeof(float), mae);
+  count++;
+  EEPROM.put(TRIAL_COUNT_LOCATION, count);
+  Serial.print(F("Trial #")); Serial.print(count);
+  Serial.println(F(" saved to EEPROM."));
+}
+
+void dumpTrials() {
+  uint8_t count;
+  EEPROM.get(TRIAL_COUNT_LOCATION, count);
+  if (count == 0 || count > MAX_TRIALS) {
+    Serial.println(F("No trials logged."));
+    return;
+  }
+  Serial.println(F("trial,Kp,heading,MAE"));
+  for (uint8_t i = 0; i < count; i++) {
+    uint16_t addr = TRIAL_DATA_START + (uint16_t)i * TRIAL_ROW_SIZE;
+    float kp_val, hd_val, mae_val;
+    EEPROM.get(addr,                    kp_val);
+    EEPROM.get(addr + sizeof(float),    hd_val);
+    EEPROM.get(addr + 2 * sizeof(float), mae_val);
+    Serial.print(i + 1);       Serial.print(',');
+    Serial.print(kp_val, 4);   Serial.print(',');
+    Serial.print(hd_val, 2);   Serial.print(',');
+    Serial.println(mae_val, 4);
+  }
+}
+
+void clearTrials() {
+  EEPROM.put(TRIAL_COUNT_LOCATION, (uint8_t)0);
+  Serial.println(F("Trial log cleared."));
+}
+
+// Helper: stop steering, compute MAE, log trial
+void stopSteering() {
+  steering = false;
+  servo.writeMicroseconds(servo_center);
+  if (sampleCount > 0) {
+    float mae = errorSum / (float)sampleCount;
+    Serial.print(F("Steering stopped. MAE = "));
+    Serial.print(mae, 4);
+    Serial.print(F(" ("));
+    Serial.print(sampleCount);
+    Serial.println(F(" samples)"));
+    saveTrialToEEPROM(mae);
+  } else {
+    Serial.println(F("Steering stopped. No samples collected."));
+  }
+}
+
 // ── Steering ──
 
 void steerUpdate() {
-  float current = magHeading();
-  float error   = target_heading - current;
+  // Apply gamma low-pass filter to heading
+  filtered_heading = (1.0 - gamma_filter) * magHeading() + gamma_filter * filtered_heading;
 
-  Serial.print(current);
-  Serial.print(F("  "));
-  Serial.print(error);
+  float current = filtered_heading;
+  float error   = target_heading - current;
 
   // wrap error to -180..+180
   if (error >  180.0) error -= 360.0;
   if (error < -180.0) error += 360.0;
+
+  // Accumulate MAE (using wrapped error)
+  errorSum += fabs(error);
+  sampleCount++;
+
+  Serial.print(current);
+  Serial.print(F("  "));
+  Serial.print(error);
 
   // within tolerance — hold center
   if (fabs(error) <= heading_tolerance) {
@@ -256,8 +336,6 @@ void setup() {
   }
   mag.enableDefault();
 
-  pinMode(SOLENOID_PIN, OUTPUT);
-  digitalWrite(SOLENOID_PIN, LOW);
   pinMode(BTN_L, INPUT_PULLUP);
   pinMode(BTN_R, INPUT_PULLUP);
 
@@ -284,6 +362,13 @@ void setup() {
     EEPROM.get(KP_LOCATION,      Kp);
     EEPROM.get(HEADING_LOCATION, target_heading);
     Serial.println(F("Steering params loaded from EEPROM."));
+  }
+
+  // Ensure trial count is valid (fresh EEPROM may have 0xFF)
+  uint8_t tc;
+  EEPROM.get(TRIAL_COUNT_LOCATION, tc);
+  if (tc > MAX_TRIALS) {
+    EEPROM.put(TRIAL_COUNT_LOCATION, (uint8_t)0);
   }
 
   printHelp();
@@ -323,17 +408,15 @@ void loop() {
       } else if (!valid) {
         Serial.println(F("Servo not calibrated."));
       } else {
+        filtered_heading = magHeading();
+        errorSum = 0.0;
+        sampleCount = 0;
         steering = true;
-        solPulsed = false;
         Serial.print(F("Steering ON. Target="));
         Serial.println(target_heading);
       }
     } else {
-      steering = false;
-      digitalWrite(SOLENOID_PIN, LOW);
-      solPulsed = false;
-      servo.writeMicroseconds(servo_center);
-      Serial.println(F("Steering stopped."));
+      stopSteering();
     }
   }
 
@@ -356,26 +439,13 @@ void loop() {
 
   // Kp steering loop
   if (steering) {
-    // Solenoid firing (non-blocking)
-    if (!solPulsed) {
-      digitalWrite(SOLENOID_PIN, HIGH);
-      solPulsed = true;
-      solTimer = now;
-    }
-    if (now - solTimer >= PULSE_MS)        digitalWrite(SOLENOID_PIN, LOW);
-    if (now - solTimer >= FIRE_INTERVAL_MS) solPulsed = false;
-
     steerUpdate();
     delay(20); // 50 Hz control loop
     // check for stop command
     if (Serial.available()) {
       char c = Serial.read();
       if (c == 'p') {
-        steering = false;
-        digitalWrite(SOLENOID_PIN, LOW);
-        solPulsed = false;
-        servo.writeMicroseconds(servo_center);
-        Serial.println(F("Steering stopped."));
+        stopSteering();
       }
     }
     return;
@@ -447,6 +517,9 @@ void loop() {
         Serial.println(F("Servo not calibrated first."));
         return;
       }
+      filtered_heading = magHeading();
+      errorSum = 0.0;
+      sampleCount = 0;
       steering = true;
       Serial.print(F("Steering ON. Target="));
       Serial.print(target_heading);
@@ -465,6 +538,8 @@ void loop() {
       Serial.print(Kp);
       Serial.println(F(". Enter new value:"));
       return;
+    case 'w': dumpTrials();  return;
+    case 'c': clearTrials(); return;
     case 'h': printHelp(); return;
     case '\n':
     case '\r': return;
