@@ -1,151 +1,146 @@
 #pragma once
 #include <Arduino.h>
 #include <EEPROM.h>
-#include <Interrupt.h>
-#include <LIS3MDL.h>
 #include <Wire.h>
-
-// EEPROM layout (follows servo cal data which ends at byte 6)
-// byte 7:      MAG_VALID_LOCATION  (uint8_t magic)
-// bytes 8-13:  MAG_MIN_LOCATION    (LIS3MDL::vector<int16_t>, 3 × int16_t = 6 bytes)
-// bytes 14-19: MAG_MAX_LOCATION    (LIS3MDL::vector<int16_t>, 3 × int16_t = 6 bytes)
-const uint8_t MAG_VALID_LOCATION = 7;
-const uint8_t MAG_MIN_LOCATION   = MAG_VALID_LOCATION + sizeof(uint8_t);
-const uint8_t MAG_MAX_LOCATION   = MAG_MIN_LOCATION   + sizeof(LIS3MDL::vector<int16_t>);
-
-LIS3MDL mag;
-LIS3MDL::vector<int16_t> mag_min;
-LIS3MDL::vector<int16_t> mag_max;
-boolean mag_valid;
+#include <LIS3MDL.h>
+#include <EEPROMLayout.h>
 
 struct MagControl {
-    private:
-    enum State { IDLE, CAL, DONE } state;
-    LIS3MDL::vector<int16_t> running_min;
-    LIS3MDL::vector<int16_t> running_max;
-    uint32_t last_change_ms;
-    bool stable;
-    bool first_sample;
+private:
+    LIS3MDL _mag;
+    LIS3MDL::vector<int16_t> _mag_min;
+    LIS3MDL::vector<int16_t> _mag_max;
+    LIS3MDL::vector<int16_t> _running_min;
+    LIS3MDL::vector<int16_t> _running_max;
+    bool  _calibrated;
+    bool  _collecting;
+    float _tare_offset;
 
-    static const uint32_t STABLE_MS = 2000UL;
-
-    void _startCal() {
-        running_min  = { 32767,  32767,  32767};
-        running_max  = {-32768, -32768, -32768};
-        stable       = false;
-        first_sample = false;
-        ledSetBlink(100);   // fast blink: no valid cal, rotate sensor
-        state = CAL;
+    float _calibratedX() {
+        float range = _mag_max.x - _mag_min.x;
+        if (range == 0) return 0;
+        return (_mag.m.x - (_mag_max.x + _mag_min.x) / 2.0f) / (range / 2.0f);
     }
 
-    public:
-    MagControl() : state{IDLE} {}
+    float _calibratedY() {
+        float range = _mag_max.y - _mag_min.y;
+        if (range == 0) return 0;
+        return (_mag.m.y - (_mag_max.y + _mag_min.y) / 2.0f) / (range / 2.0f);
+    }
 
+public:
+    MagControl() : _calibrated(false), _collecting(false), _tare_offset(0.0f) {}
+
+    /**
+     * Initialises I2C and the magnetometer, then loads calibration from EEPROM
+     * if a valid magic byte is present. Call once from setup().
+     */
     void enter() {
         Wire.begin();
-        delay(10);  // allow I2C bus to settle after init
+        delay(10);
 
-        if (!mag.init()) {
-            Serial.println(F("Failed to detect and initialize magnetometer."));
+        if (!_mag.init()) {
+            Serial.println(F("Failed to detect magnetometer."));
             while (1);
         }
-        mag.enableDefault();
+        _mag.enableDefault();
 
         uint8_t magic;
         EEPROM.get(MAG_VALID_LOCATION, magic);
-        mag_valid = (magic == 0xA5);
-
-        if (mag_valid) {
-            EEPROM.get(MAG_MIN_LOCATION, mag_min);
-            EEPROM.get(MAG_MAX_LOCATION, mag_max);
-            ledSetBlink(500);   // slow blink: valid stored, waiting for input
-            state = IDLE;
+        if (magic == 0xA5) {
+            EEPROM.get(MAG_MIN_LOCATION, _mag_min);
+            EEPROM.get(MAG_MAX_LOCATION, _mag_max);
+            _calibrated = true;
+            Serial.println(F("Mag calibration loaded from EEPROM."));
         } else {
-            _startCal();
+            Serial.println(F("No mag calibration found. Run 'm' to start."));
         }
     }
 
     /**
-     * Call every loop iteration.
-     *
-     * IDLE state (valid stored):
-     *   button 2 (right)  → accept stored values, advance to DONE
-     *   button 1 (left)   → clear EEPROM, re-enter CAL
-     *
-     * CAL state:
-     *   Reads mag each call, tracks running min/max across all 3 axes.
-     *   LED blinks (100 ms) while any axis extreme is still changing.
-     *   LED goes solid once no new extreme for STABLE_MS (2 s).
-     *   button 3 (both)   → save to EEPROM (only accepted when stable)
+     * Reads the magnetometer and, if a calibration is in progress, updates
+     * the running min/max. Call every loop iteration.
      */
-    void update(uint8_t button) {
-        switch (state) {
-            case IDLE:
-                if (button == 0) break;
+    void update() {
+        _mag.read();
+        if (!_collecting) return;
 
-                if (button == 2) {          // right = continue
-                    state = DONE;
-                } else if (button == 1) {   // left = reset, re-calibrate
-                    clearMag();
-                    _startCal();
-                }
-                break;
-
-            case CAL: {
-                mag.read();
-
-                bool changed = false;
-                if (mag.m.x < running_min.x) { running_min.x = mag.m.x; changed = true; }
-                if (mag.m.y < running_min.y) { running_min.y = mag.m.y; changed = true; }
-                if (mag.m.z < running_min.z) { running_min.z = mag.m.z; changed = true; }
-                if (mag.m.x > running_max.x) { running_max.x = mag.m.x; changed = true; }
-                if (mag.m.y > running_max.y) { running_max.y = mag.m.y; changed = true; }
-                if (mag.m.z > running_max.z) { running_max.z = mag.m.z; changed = true; }
-
-                if (changed) {
-                    if (!first_sample) first_sample = true;
-                    last_change_ms = millis();
-                    if (stable) {
-                        // new extreme appeared after going stable — keep rotating
-                        stable = false;
-                        ledSetBlink(100);
-                    }
-                } else if (first_sample && !stable
-                           && (millis() - last_change_ms >= STABLE_MS)) {
-                    // no new extreme for 2 s → ready to save
-                    stable = true;
-                    ledSetOn();
-                }
-
-                // only accept save once stable (LED solid)
-                if (button == 3 && stable) {
-                    mag_min = running_min;
-                    mag_max = running_max;
-                    EEPROM.put(MAG_MIN_LOCATION,   mag_min);
-                    EEPROM.put(MAG_MAX_LOCATION,   mag_max);
-                    EEPROM.put(MAG_VALID_LOCATION, (uint8_t)0xA5);
-                    mag_valid = true;
-                    state = DONE;
-
-                    ledSetBlink(50);    // rapid confirmation flash
-                    delay(500);
-                    ledSetOn();
-                }
-                break;
-            }
-
-            case DONE:
-                break;
-        }
+        if (_mag.m.x < _running_min.x) _running_min.x = _mag.m.x;
+        if (_mag.m.y < _running_min.y) _running_min.y = _mag.m.y;
+        if (_mag.m.z < _running_min.z) _running_min.z = _mag.m.z;
+        if (_mag.m.x > _running_max.x) _running_max.x = _mag.m.x;
+        if (_mag.m.y > _running_max.y) _running_max.y = _mag.m.y;
+        if (_mag.m.z > _running_max.z) _running_max.z = _mag.m.z;
     }
 
-    bool isDone() const { return state == DONE; }
+    /**
+     * Resets running min/max and starts collecting calibration samples.
+     * Triggered by serial command 'm'.
+     */
+    void startCal() {
+        _running_min = { 32767,  32767,  32767};
+        _running_max = {-32768, -32768, -32768};
+        _collecting  = true;
+        Serial.println(F("Mag cal started. Rotate sensor slowly through 360 deg."));
+        Serial.println(F("Send 'd' when done."));
+    }
 
-    void clearMag() {
+    /**
+     * Stops collection, validates the data, and saves to EEPROM.
+     * Triggered by serial command 'd'.
+     */
+    void finishCal() {
+        _collecting = false;
+
+        if (_running_max.x == _running_min.x || _running_max.y == _running_min.y) {
+            Serial.println(F("Cal failed: no variation detected. Try again."));
+            return;
+        }
+
+        _mag_min = _running_min;
+        _mag_max = _running_max;
+        EEPROM.put(MAG_MIN_LOCATION,   _mag_min);
+        EEPROM.put(MAG_MAX_LOCATION,   _mag_max);
+        EEPROM.put(MAG_VALID_LOCATION, (uint8_t)0xA5);
+        _calibrated = true;
+
+        Serial.println(F("Mag calibration saved."));
+        Serial.print(F("  min: x=")); Serial.print(_mag_min.x);
+        Serial.print(F(" y="));       Serial.println(_mag_min.y);
+        Serial.print(F("  max: x=")); Serial.print(_mag_max.x);
+        Serial.print(F(" y="));       Serial.println(_mag_max.y);
+    }
+
+    /**
+     * Clears magnetometer calibration from EEPROM.
+     */
+    void clearCal() {
         LIS3MDL::vector<int16_t> zero = {0, 0, 0};
         EEPROM.put(MAG_MIN_LOCATION,   zero);
         EEPROM.put(MAG_MAX_LOCATION,   zero);
         EEPROM.put(MAG_VALID_LOCATION, (uint8_t)0x00);
-        mag_valid = false;
+        _calibrated = false;
+    }
+
+    bool isCalibrated() const { return _calibrated; }
+    bool isCollecting()  const { return _collecting; }
+
+    /** Returns raw heading in degrees (-180 to +180). */
+    float headingRaw() {
+        return atan2(_calibratedY(), _calibratedX()) * 180.0f / PI;
+    }
+
+    /** Returns heading relative to the tare point (-180 to +180). */
+    float heading() {
+        float h = headingRaw() - _tare_offset;
+        if (h >  180.0f) h -= 360.0f;
+        if (h < -180.0f) h += 360.0f;
+        return h;
+    }
+
+    /** Sets the current heading as the zero reference. */
+    void tare() {
+        _tare_offset = headingRaw();
+        Serial.println(F("Heading tared to 0."));
     }
 };
