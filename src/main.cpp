@@ -60,7 +60,7 @@ void printHelp() {
   Serial.println(F("  r      - right (button 2)"));
   Serial.println(F("  b      - both  (button 3 / store & advance)"));
   Serial.println(F("  s      - print status"));
-  Serial.println(F("  x      - clear all EEPROM cal data"));
+  Serial.println(F("  x      - reset servo cal (restart from phase 1)"));
   Serial.println(F("-- Mag calibration --"));
   Serial.println(F("  m      - start mag calibration (rotate slowly 360)"));
   Serial.println(F("  d      - finish & save mag calibration"));
@@ -93,15 +93,6 @@ void printStatus() {
   Serial.print(F("Kp:           ")); Serial.println(Kp);
   Serial.print(F("tolerance:    ")); Serial.println(heading_tolerance);
   Serial.println(F("--------------"));
-}
-
-void clearAllCal() {
-  sc.clearLocation(CENTER_LOCATION);
-  sc.clearLocation(LEFT_LOCATION);
-  sc.clearLocation(RIGHT_LOCATION);
-  mc.clearCal();
-  EEPROM.put(STEER_VALID_LOCATION, (uint8_t)0x00);
-  Serial.println(F("All EEPROM cal data cleared. Reset board to recalibrate."));
 }
 
 // ── Steering control ──
@@ -336,7 +327,7 @@ void loop() {
     case 'r': button = 2; break;
     case 'b': button = 3; break;
     case 's': printStatus(); return;
-    case 'x': clearAllCal(); return;
+    case 'x': sc.reset(); return;
     case 'm': mc.startCal();  return;
     case 'd': mc.finishCal(); return;
     case 'a':

@@ -60,116 +60,96 @@ struct ServoControl{
     
     /**
      * Proceeds through three phases.
-     * Phase 1:
-     *  Center Location calibration. 
-     *  Reset button press, clears the EEPROM.
-     *  If (valid->center) proceed to phase 2.
-     * Phase 2:
-     *  Left Location calibration.
-     *  Reset button press, clears the EEPROM.
-     *  If (valid->left) proceed to phase 3.
-     * Phase 3:
-     *  Right Location calibration.
-     *  Reset button press, clears the EEPROM.
-     *  If (valid->right) proceed to next state.
+     * All phases: l=adjust left, r=adjust right, b=confirm & advance.
+     * Use 'x' serial command to restart servo calibration from phase 1.
      */
     void update(uint8_t button) {
         switch (state) {
             case P1:
-                if (button == 0) break; // fast break dont compute unnecesary things
+                if (button == 0) break;
 
-                if (servo_center != 0) {   // valid stored
-                    if (button == 1) {
-                        clearLocation(CENTER_LOCATION);    // reset pressed
-                        servo.writeMicroseconds(heading);
-                        servo_center = 0;
-                    } else if (button == 2) {
-                        state = P2; // continue pressed next phase
-                        heading = servo_center;
-                    }
-                } else if (button == 1) {   // left
+                if (button == 1) {
                     heading -= 5;
                     servo.writeMicroseconds(heading);
-                } else if (button == 2) {   // right
+                } else if (button == 2) {
                     heading += 5;
                     servo.writeMicroseconds(heading);
-                } else if (button == 3) {   // both pressed -> store -> nextstate
+                } else if (button == 3) {
                     EEPROM.put(CENTER_LOCATION, heading);
-
                     servo_center = heading;
                     state = P2;
-
-                    ledSetBlink(50);    // blink rapidly
+                    Serial.println(F("Center saved. Now set LEFT limit."));
+                    ledSetBlink(50);
                     delay(500);
-                    ledSetBlink(250);   // reset to normal blink rate
+                    ledSetBlink(250);
                 }
-
                 break;
+
             case P2:
                 if (button == 0) break;
 
-                if (servo_left_limit != 0) {
-                    if (button == 1) {
-                        clearLocation(LEFT_LOCATION);
-                        servo.writeMicroseconds(servo_center);  // move to center
-                        servo_left_limit = 0;
-                    } else if (button == 2) {
-                        state = P3;
-                    }
-                    heading = servo_center;
-                } else if (button == 1) { // left 
-                    heading -= 5;    // 2 because 1 is probably too slow can change later
+                if (button == 1) {
+                    heading -= 5;
                     servo.writeMicroseconds(heading);
-                } else if (button == 2) { // right
+                } else if (button == 2) {
                     heading += 5;
                     servo.writeMicroseconds(heading);
                 } else if (button == 3) {
                     EEPROM.put(LEFT_LOCATION, heading);
-
                     servo_left_limit = heading;
+                    heading = servo_center;
+                    servo.writeMicroseconds(heading);
                     state = P3;
-
-                    ledSetBlink(50); 
+                    Serial.println(F("Left saved. Now set RIGHT limit."));
+                    ledSetBlink(50);
                     delay(500);
                     ledSetBlink(250);
                 }
-                
                 break;
+
             case P3:
                 if (button == 0) break;
 
-                if (servo_right_limit != 0) {
-                    if (button == 1) {
-                        clearLocation(RIGHT_LOCATION);
-                        servo.writeMicroseconds(servo_center);  // move to center
-                        servo_right_limit = 0;
-                    } else if (button == 2) {
-                        state = RUN;
-                    }
-                    heading = servo_center;
-                } else if (button == 1) { // left 
-                    heading -= 5;    // 2 because 1 is probably too slow can change later
+                if (button == 1) {
+                    heading -= 5;
                     servo.writeMicroseconds(heading);
-                } else if (button == 2) { // right
+                } else if (button == 2) {
                     heading += 5;
                     servo.writeMicroseconds(heading);
                 } else if (button == 3) {
                     EEPROM.put(RIGHT_LOCATION, heading);
                     EEPROM.put(VALID_LOCATION, (uint8_t)0xA5);
                     valid = true;
-
                     servo_right_limit = heading;
                     state = RUN;
-
+                    Serial.println(F("Right saved. Servo calibration complete."));
                     ledSetBlink(50);
                     delay(500);
                     ledSetOn();
                 }
-                
                 break;
-            case RUN:   // does nothing right now
+
+            case RUN:
                 break;
         }
+    }
+
+    /**
+     * Resets servo calibration only — clears servo EEPROM locations and
+     * returns to phase 1. Does not affect mag calibration.
+     */
+    void reset() {
+        clearLocation(CENTER_LOCATION);
+        clearLocation(LEFT_LOCATION);
+        clearLocation(RIGHT_LOCATION);
+        servo_center      = 0;
+        servo_left_limit  = 0;
+        servo_right_limit = 0;
+        heading = 1500;
+        servo.writeMicroseconds(heading);
+        state = P1;
+        ledSetBlink(250);
+        Serial.println(F("Servo cal reset. Starting phase 1: set CENTER."));
     }
 
     /**
