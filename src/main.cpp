@@ -11,8 +11,8 @@
 #define DEBOUNCE_MS     75
 #define LIMIT_DEBOUNCE   2
 #define PULSE_MS         50
-#define FIRE_INTERVAL_MS 200
-#define FIRE_TEST_MS   10000  // observation window for single-fire test (ms)
+#define FIRE_INTERVAL_MS 150
+#define FIRE_TEST_MS    7500  // timed trial duration (ms)
 
 // ── Steering tuning parameters ──
 float Kp                = 5.0;    // proportional gain
@@ -84,7 +84,7 @@ void printHelp() {
   Serial.println(F("  c      - clear trial log"));
   Serial.println(F("-- Buttons --"));
   Serial.println(F("  GPIO 8 - tare heading"));
-  Serial.println(F("  GPIO 9 - toggle steering + solenoid on/off"));
+  Serial.println(F("  GPIO 9 - start/stop timed 5 s trial"));
   Serial.println(F("  h      - print this help"));
   Serial.println();
 }
@@ -111,13 +111,14 @@ void saveTrialToEEPROM(float mae) {
   uint8_t count;
   EEPROM.get(TRIAL_COUNT_LOCATION, count);
   if (count >= MAX_TRIALS) {
-    Serial.println(F("Trial log full (82 max). Send 'c' to clear."));
+    Serial.println(F("Trial log full (76 max). Send 'c' to clear."));
     return;
   }
   uint16_t addr = TRIAL_DATA_START + (uint16_t)count * TRIAL_ROW_SIZE;
-  EEPROM.put(addr,                  Kp);
-  EEPROM.put(addr + sizeof(float),  target_heading);
-  EEPROM.put(addr + 2*sizeof(float), mae);
+  EEPROM.put(addr,                             Kp);
+  EEPROM.put(addr + sizeof(float),             mc.getFifoSize());
+  EEPROM.put(addr + sizeof(float) + 1,         target_heading);
+  EEPROM.put(addr + sizeof(float) + 1 + sizeof(float), mae);
   count++;
   EEPROM.put(TRIAL_COUNT_LOCATION, count);
   Serial.print(F("Trial #")); Serial.print(count); Serial.println(F(" saved."));
@@ -130,16 +131,19 @@ void dumpTrials() {
     Serial.println(F("No trials logged."));
     return;
   }
-  Serial.println(F("trial,Kp,heading,MAE"));
+  Serial.println(F("trial,Kp,fifo_size,heading,MAE"));
   for (uint8_t i = 0; i < count; i++) {
     uint16_t addr = TRIAL_DATA_START + (uint16_t)i * TRIAL_ROW_SIZE;
-    float kp_val, hd_val, mae_val;
-    EEPROM.get(addr,                  kp_val);
-    EEPROM.get(addr + sizeof(float),  hd_val);
-    EEPROM.get(addr + 2*sizeof(float), mae_val);
-    Serial.print(i + 1);   Serial.print(',');
-    Serial.print(kp_val, 4); Serial.print(',');
-    Serial.print(hd_val, 2); Serial.print(',');
+    float   kp_val, hd_val, mae_val;
+    uint8_t fifo_val;
+    EEPROM.get(addr,                             kp_val);
+    EEPROM.get(addr + sizeof(float),             fifo_val);
+    EEPROM.get(addr + sizeof(float) + 1,         hd_val);
+    EEPROM.get(addr + sizeof(float) + 1 + sizeof(float), mae_val);
+    Serial.print(i + 1);      Serial.print(',');
+    Serial.print(kp_val, 4);  Serial.print(',');
+    Serial.print(fifo_val);   Serial.print(',');
+    Serial.print(hd_val, 2);  Serial.print(',');
     Serial.println(mae_val, 4);
   }
 }
@@ -166,7 +170,6 @@ void stopSteering() {
     Serial.print(limitCount);
     Serial.print(F("  Distance (in): "));
     Serial.println((double)limitCount * 1.16);
-    saveTrialToEEPROM(mae);
   } else {
     Serial.println(F("Steering stopped. No samples."));
   }
@@ -283,9 +286,9 @@ void loop() {
   // GPIO 8 → tare
   if (btnL_pressed) mc.tare();
 
-  // GPIO 9 → toggle steering + solenoid
+  // GPIO 9 → start timed trial (or stop if already firing)
   if (btnR_pressed) {
-    if (!steering) {
+    if (!firing) {
       if (!mc.isCalibrated()) {
         Serial.println(F("Mag not calibrated."));
       } else if (!valid) {
@@ -295,11 +298,20 @@ void loop() {
         sampleCount = 0;
         limitCount  = 0;
         solPulsed   = false;
-        steering    = true;
-        Serial.print(F("Steering ON. Target="));
-        Serial.println(target_heading);
+        firing      = true;
+        fireStart   = now;
+        Serial.println(F("Firing + steering for 5 s..."));
       }
     } else {
+      // treat as early stop (same as 'p')
+      firing = false;
+      digitalWrite(SOLENOID_PIN, LOW);
+      solPulsed = false;
+      servo.writeMicroseconds(servo_center);
+      Serial.print(F("Fire stopped | Heading: "));
+      Serial.print(mc.heading(), 1);
+      Serial.print(F(" deg | Distance (in): "));
+      Serial.println((double)limitCount * 1.16);
       stopSteering();
     }
   }
@@ -372,6 +384,10 @@ void loop() {
       Serial.print(mc.heading(), 1);
       Serial.print(F(" deg | Distance (in): "));
       Serial.println((double)limitCount * 1.16);
+      if (fireTimedOut && sampleCount > 0) {
+        saveTrialToEEPROM(errorSum / (float)sampleCount);
+      }
+      stopSteering();
     }
     return;
   }
