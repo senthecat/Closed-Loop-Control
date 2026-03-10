@@ -153,26 +153,39 @@ void clearTrials() {
   Serial.println(F("Trial log cleared."));
 }
 
-// ── Steering control ──
+// ── Firing / steering helpers ──
 
-void stopSteering() {
-  steering = false;
+void pulseSolenoid(unsigned long now) {
+  if (!solPulsed) {
+    digitalWrite(SOLENOID_PIN, HIGH);
+    solPulsed = true;
+    solTimer  = now;
+  }
+  if (now - solTimer >= PULSE_MS)         digitalWrite(SOLENOID_PIN, LOW);
+  if (now - solTimer >= FIRE_INTERVAL_MS) solPulsed = false;
+}
+
+void startFiring(unsigned long now) {
+  errorSum    = 0.0f;
+  sampleCount = 0;
+  limitCount  = 0;
+  solPulsed   = false;
+  firing      = true;
+  fireStart   = now;
+  Serial.println(F("Firing + steering for 7.5 s..."));
+}
+
+void stopFiring(bool timed) {
+  firing = false;
   digitalWrite(SOLENOID_PIN, LOW);
   solPulsed = false;
   servo.writeMicroseconds(servo_center);
-  if (sampleCount > 0) {
-    float mae = errorSum / (float)sampleCount;
-    Serial.print(F("Steering stopped. MAE="));
-    Serial.print(mae, 4);
-    Serial.print(F(" ("));
-    Serial.print(sampleCount);
-    Serial.print(F(" samples) | Limit triggers: "));
-    Serial.print(limitCount);
-    Serial.print(F("  Distance (in): "));
-    Serial.println((double)limitCount * 1.16);
-  } else {
-    Serial.println(F("Steering stopped. No samples."));
-  }
+  Serial.print(timed ? F("Fire complete | Heading: ") : F("Fire stopped | Heading: "));
+  Serial.print(mc.heading(), 1);
+  Serial.print(F(" deg | Distance (in): "));
+  Serial.println((double)limitCount * 1.16);
+  if (timed && sampleCount > 0)
+    saveTrialToEEPROM(errorSum / (float)sampleCount);
 }
 
 void steerUpdate() {
@@ -286,33 +299,14 @@ void loop() {
   // GPIO 8 → tare
   if (btnL_pressed) mc.tare();
 
-  // GPIO 9 → start timed trial (or stop if already firing)
+  // GPIO 9 → start timed trial (or stop early if already firing)
   if (btnR_pressed) {
     if (!firing) {
-      if (!mc.isCalibrated()) {
-        Serial.println(F("Mag not calibrated."));
-      } else if (!valid) {
-        Serial.println(F("Servo not calibrated."));
-      } else {
-        errorSum    = 0.0f;
-        sampleCount = 0;
-        limitCount  = 0;
-        solPulsed   = false;
-        firing      = true;
-        fireStart   = now;
-        Serial.println(F("Firing + steering for 5 s..."));
-      }
+      if (!mc.isCalibrated()) Serial.println(F("Mag not calibrated."));
+      else if (!valid)         Serial.println(F("Servo not calibrated."));
+      else                     startFiring(now);
     } else {
-      // treat as early stop (same as 'p')
-      firing = false;
-      digitalWrite(SOLENOID_PIN, LOW);
-      solPulsed = false;
-      servo.writeMicroseconds(servo_center);
-      Serial.print(F("Fire stopped | Heading: "));
-      Serial.print(mc.heading(), 1);
-      Serial.print(F(" deg | Distance (in): "));
-      Serial.println((double)limitCount * 1.16);
-      stopSteering();
+      stopFiring(false);
     }
   }
 
@@ -335,60 +329,29 @@ void loop() {
 
   // ── Kp steering + solenoid loop ──
   if (steering) {
-    if (!solPulsed) {
-      digitalWrite(SOLENOID_PIN, HIGH);
-      solPulsed = true;
-      solTimer  = now;
-    }
-    if (now - solTimer >= PULSE_MS)         digitalWrite(SOLENOID_PIN, LOW);
-    if (now - solTimer >= FIRE_INTERVAL_MS) solPulsed = false;
-
+    pulseSolenoid(now);
     steerUpdate();
     delay(20);
 
-    if (Serial.available()) {
-      char c = Serial.read();
-      if (c == 'p') stopSteering();
+    if (Serial.available() && Serial.read() == 'p') {
+      steering = false;
+      digitalWrite(SOLENOID_PIN, LOW);
+      solPulsed = false;
+      servo.writeMicroseconds(servo_center);
+      Serial.println(F("Steering stopped."));
     }
     return;
   }
 
-  // ── Single-fire test ──
+  // ── Timed firing trial ──
   if (firing) {
-    // Repeated solenoid pulses
-    if (!solPulsed) {
-      digitalWrite(SOLENOID_PIN, HIGH);
-      solPulsed = true;
-      solTimer  = now;
-    }
-    if (now - solTimer >= PULSE_MS)         digitalWrite(SOLENOID_PIN, LOW);
-    if (now - solTimer >= FIRE_INTERVAL_MS) solPulsed = false;
-
-    // Steer servo toward target heading
+    pulseSolenoid(now);
     steerUpdate();
     delay(20);
 
-    bool fireTimedOut = (now - fireStart >= FIRE_TEST_MS);
-    bool fireStopped  = false;
-    if (Serial.available()) {
-      char c = Serial.read();
-      if (c == 'p') fireStopped = true;
-    }
-
-    if (fireTimedOut || fireStopped) {
-      firing = false;
-      digitalWrite(SOLENOID_PIN, LOW);
-      solPulsed = false;
-      servo.writeMicroseconds(servo_center);
-      Serial.print(fireStopped ? F("Fire stopped | Heading: ") : F("Fire complete | Heading: "));
-      Serial.print(mc.heading(), 1);
-      Serial.print(F(" deg | Distance (in): "));
-      Serial.println((double)limitCount * 1.16);
-      if (fireTimedOut && sampleCount > 0) {
-        saveTrialToEEPROM(errorSum / (float)sampleCount);
-      }
-      stopSteering();
-    }
+    bool timed   = (now - fireStart >= FIRE_TEST_MS);
+    bool stopped = Serial.available() && Serial.read() == 'p';
+    if (timed || stopped) stopFiring(timed);
     return;
   }
 
@@ -453,41 +416,18 @@ void loop() {
         mc.tare();
       }
       return;
-    case 'f': // single-fire test
-      if (!mc.isCalibrated()) {
-        Serial.println(F("Mag not calibrated first."));
-        return;
-      }
-      if (!valid) {
-        Serial.println(F("Servo not calibrated first."));
-        return;
-      }
-      firing     = true;
-      limitCount = 0;
-      solPulsed  = false;
-      fireStart  = now;
-      Serial.println(F("Firing + steering for 10 s..."));
+    case 'f':
+      if (!mc.isCalibrated()) { Serial.println(F("Mag not calibrated first.")); return; }
+      if (!valid)             { Serial.println(F("Servo not calibrated first.")); return; }
+      startFiring(now);
       return;
-    case 'g': // start steering
-      if (!mc.isCalibrated()) {
-        Serial.println(F("Mag not calibrated first."));
-        return;
-      }
-      if (!valid) {
-        Serial.println(F("Servo not calibrated first."));
-        return;
-      }
-      errorSum    = 0.0f;
-      sampleCount = 0;
-      limitCount  = 0;
-      solPulsed   = false;
-      steering    = true;
-      Serial.print(F("Steering ON. Target="));
-      Serial.print(target_heading);
-      Serial.print(F(" Tol="));
-      Serial.print(heading_tolerance);
-      Serial.print(F(" Kp="));
-      Serial.println(Kp);
+    case 'g': // continuous steering (no timer, no save)
+      if (!mc.isCalibrated()) { Serial.println(F("Mag not calibrated first.")); return; }
+      if (!valid)             { Serial.println(F("Servo not calibrated first.")); return; }
+      errorSum = 0.0f; sampleCount = 0; limitCount = 0; solPulsed = false;
+      steering = true;
+      Serial.print(F("Steering ON. Target=")); Serial.print(target_heading);
+      Serial.print(F(" Kp=")); Serial.println(Kp);
       Serial.println(F("Send 'p' to stop."));
       return;
     case 'p':
