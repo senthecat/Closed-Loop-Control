@@ -48,8 +48,9 @@ int           limitCount = 0;
 
 // Serial buffer for numeric entry
 char    serialBuf[16];
-uint8_t serialBufIdx    = 0;
-bool    serialSettingKp = false;
+uint8_t serialBufIdx      = 0;
+bool    serialSettingKp   = false;
+bool    serialSettingFifo = false;
 
 // ── Helpers ──
 
@@ -64,6 +65,7 @@ void printHelp() {
   Serial.println(F("-- Mag calibration --"));
   Serial.println(F("  m      - start mag calibration (rotate slowly 360)"));
   Serial.println(F("  d      - finish & save mag calibration"));
+  Serial.println(F("  n      - set heading FIFO size (1-20, default 10)"));
   Serial.println(F("-- Heading --"));
   Serial.println(F("  a      - stream heading angle (any key to stop)"));
   Serial.println(F("  t      - tare heading to zero"));
@@ -88,6 +90,7 @@ void printStatus() {
   Serial.print(F("right limit:  ")); Serial.println(servo_right_limit);
   Serial.print(F("servo valid:  ")); Serial.println(valid ? "yes" : "no");
   Serial.print(F("mag cal:      ")); Serial.println(mc.isCalibrated() ? "yes" : "no");
+  Serial.print(F("mag FIFO:     ")); Serial.println(mc.getFifoSize());
   Serial.print(F("steering:     ")); Serial.println(steering ? "on" : "off");
   Serial.print(F("target hdg:   ")); Serial.println(target_heading);
   Serial.print(F("Kp:           ")); Serial.println(Kp);
@@ -308,6 +311,9 @@ void loop() {
       EEPROM.put(STEER_VALID_LOCATION,  (uint8_t)0xC4);
       Serial.print(F("Kp set to: "));
       Serial.println(Kp);
+    } else if (serialSettingFifo) {
+      serialSettingFifo = false;
+      mc.setFifoSize((uint8_t)val);
     } else {
       target_heading = val;
       EEPROM.put(HEADING_LOCATION,      target_heading);
@@ -317,8 +323,9 @@ void loop() {
     }
     return;
   }
-  serialBufIdx    = 0;
-  serialSettingKp = false;
+  serialBufIdx      = 0;
+  serialSettingKp   = false;
+  serialSettingFifo = false;
 
   uint8_t button = 0;
 
@@ -379,6 +386,14 @@ void loop() {
       Serial.print(F("Current Kp="));
       Serial.print(Kp);
       Serial.println(F(". Enter new value:"));
+      return;
+    case 'n':
+      serialSettingFifo = true;
+      Serial.print(F("Current FIFO size="));
+      Serial.print(mc.getFifoSize());
+      Serial.print(F(" (max "));
+      Serial.print(MAG_FIFO_MAX);
+      Serial.println(F("). Enter new value:"));
       return;
     case 'h': printHelp(); return;
     case '\n':

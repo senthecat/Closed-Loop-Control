@@ -5,6 +5,10 @@
 #include <LIS3MDL.h>
 #include <EEPROMLayout.h>
 
+// Maximum allowable FIFO depth. Increasing this costs 8 bytes RAM per slot
+// (two floats: x and y). At 20 slots that is 160 bytes.
+#define MAG_FIFO_MAX 20
+
 struct MagControl {
 private:
     LIS3MDL _mag;
@@ -21,6 +25,14 @@ private:
     bool  _collecting;
     float _tare_offset;
 
+    // Heading FIFO — stores normalised Cartesian samples to avoid wrap-around
+    // when averaging. Averaged via atan2(mean_y, mean_x).
+    float   _fx[MAG_FIFO_MAX];
+    float   _fy[MAG_FIFO_MAX];
+    uint8_t _fifo_size;   // runtime depth (1–MAG_FIFO_MAX)
+    uint8_t _fifo_head;   // next write index
+    uint8_t _fifo_count;  // number of valid samples currently in buffer
+
     float _calibratedX() {
         return (_mag.m.x - _offset_x) / (_range_x / 2.0f);
     }
@@ -29,12 +41,22 @@ private:
         return (_mag.m.y - _offset_y) / (_range_y / 2.0f);
     }
 
+    // Push one Cartesian sample into the ring buffer.
+    void _pushSample() {
+        _fx[_fifo_head] = _calibratedX();
+        _fy[_fifo_head] = _calibratedY();
+        _fifo_head = (_fifo_head + 1) % _fifo_size;
+        if (_fifo_count < _fifo_size) _fifo_count++;
+    }
+
 public:
-    MagControl() : _calibrated(false), _collecting(false), _tare_offset(0.0f) {}
+    MagControl()
+        : _calibrated(false), _collecting(false), _tare_offset(0.0f),
+          _fifo_size(10), _fifo_head(0), _fifo_count(0) {}
 
     /**
-     * Initialises I2C and the magnetometer, then loads calibration from EEPROM
-     * if a valid magic byte is present. Call once from setup().
+     * Initialises I2C and the magnetometer, then loads calibration and FIFO
+     * size from EEPROM if valid magic bytes are present. Call once from setup().
      */
     void enter() {
         Wire.begin();
@@ -58,16 +80,29 @@ public:
         } else {
             Serial.println(F("No mag calibration found. Run 'm' to start."));
         }
+
+        // Load FIFO size; fall back to 10 if unset or out of range.
+        uint8_t stored_fifo;
+        EEPROM.get(MAG_FIFO_SIZE_LOCATION, stored_fifo);
+        if (stored_fifo < 1 || stored_fifo > MAG_FIFO_MAX) stored_fifo = 10;
+        _fifo_size  = stored_fifo;
+        _fifo_head  = 0;
+        _fifo_count = 0;
+        Serial.print(F("Mag FIFO size: "));
+        Serial.println(_fifo_size);
     }
 
     /**
-     * Reads the magnetometer and, if a calibration is in progress, updates
-     * the running min/max. Call every loop iteration.
+     * Reads the magnetometer, pushes a sample into the heading FIFO (when
+     * calibrated), and updates the running min/max during active calibration.
+     * Call every loop iteration.
      */
     void update() {
         _mag.read();
-        if (!_collecting) return;
 
+        if (_calibrated) _pushSample();
+
+        if (!_collecting) return;
         if (_mag.m.x < _min_x) _min_x = _mag.m.x;
         if (_mag.m.x > _max_x) _max_x = _mag.m.x;
         if (_mag.m.y < _min_y) _min_y = _mag.m.y;
@@ -113,6 +148,10 @@ public:
         EEPROM.put(MAG_VALID_LOCATION,    (uint8_t)0xB6);
         _calibrated = true;
 
+        // Flush the FIFO so stale pre-calibration samples do not pollute output.
+        _fifo_head  = 0;
+        _fifo_count = 0;
+
         Serial.println(F("Mag calibration saved:"));
         Serial.print(F("  offset_x = ")); Serial.println(_offset_x);
         Serial.print(F("  offset_y = ")); Serial.println(_offset_y);
@@ -130,14 +169,45 @@ public:
         EEPROM.put(MAG_RANGE_Y_LOCATION,  0.0f);
         EEPROM.put(MAG_VALID_LOCATION,    (uint8_t)0x00);
         _calibrated = false;
+        _fifo_head  = 0;
+        _fifo_count = 0;
     }
 
-    bool isCalibrated() const { return _calibrated; }
-    bool isCollecting()  const { return _collecting; }
+    /**
+     * Changes the FIFO depth, flushes the buffer, and saves to EEPROM.
+     * n is clamped to [1, MAG_FIFO_MAX].
+     */
+    void setFifoSize(uint8_t n) {
+        if (n < 1)           n = 1;
+        if (n > MAG_FIFO_MAX) n = MAG_FIFO_MAX;
+        _fifo_size  = n;
+        _fifo_head  = 0;
+        _fifo_count = 0;
+        EEPROM.put(MAG_FIFO_SIZE_LOCATION, n);
+        Serial.print(F("Mag FIFO size set to "));
+        Serial.print(n);
+        Serial.println(F(". Buffer flushed."));
+    }
 
-    /** Returns raw heading in degrees (-180 to +180). */
+    uint8_t getFifoSize()  const { return _fifo_size; }
+    bool    isCalibrated() const { return _calibrated; }
+    bool    isCollecting() const { return _collecting; }
+
+    /**
+     * Returns the moving-average heading in degrees (-180 to +180).
+     * Averaging is done in Cartesian space to handle the ±180° wrap correctly.
+     * Falls back to the instantaneous reading if the FIFO is empty.
+     */
     float headingRaw() {
-        return atan2(_calibratedY(), _calibratedX()) * 180.0f / PI;
+        if (_fifo_count == 0)
+            return atan2(_calibratedY(), _calibratedX()) * 180.0f / PI;
+
+        float sx = 0.0f, sy = 0.0f;
+        for (uint8_t i = 0; i < _fifo_count; i++) {
+            sx += _fx[i];
+            sy += _fy[i];
+        }
+        return atan2(sy / _fifo_count, sx / _fifo_count) * 180.0f / PI;
     }
 
     /** Returns heading relative to the tare point (-180 to +180). */
@@ -148,7 +218,7 @@ public:
         return h;
     }
 
-    /** Sets the current heading as the zero reference. */
+    /** Sets the current averaged heading as the zero reference. */
     void tare() {
         _tare_offset = headingRaw();
         Serial.println(F("Heading tared to 0."));

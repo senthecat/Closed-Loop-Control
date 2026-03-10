@@ -15,28 +15,30 @@
 //  12       4    float    Mag offset Y
 //  16       4    float    Mag range X
 //  20       4    float    Mag range Y
+//  24       1    uint8_t  Mag heading FIFO size (1–20, default 10)
 //
-//  24       1    uint8_t  Steering valid magic (0xC4 = valid)
-//  25       4    float    Kp gain
-//  29       4    float    Target heading (degrees)
+//  25       1    uint8_t  Steering valid magic (0xC4 = valid)
+//  26       4    float    Kp gain
+//  30       4    float    Target heading (degrees)
 //
-//  Total: 33 bytes
+//  Total: 34 bytes
 // ─────────────────────────────────────────────────────────────────────────────
 
 // Servo calibration  [0–6]
-static const uint8_t VALID_LOCATION        = 0;
-static const uint8_t CENTER_LOCATION       = 1;
-static const uint8_t LEFT_LOCATION         = 3;
-static const uint8_t RIGHT_LOCATION        = 5;
+static const uint8_t VALID_LOCATION           = 0;
+static const uint8_t CENTER_LOCATION          = 1;
+static const uint8_t LEFT_LOCATION            = 3;
+static const uint8_t RIGHT_LOCATION           = 5;
 
-// Magnetometer calibration  [7–23]
-static const uint8_t MAG_VALID_LOCATION    = 7;
-static const uint8_t MAG_OFFSET_X_LOCATION = 8;
-static const uint8_t MAG_OFFSET_Y_LOCATION = 12;
-static const uint8_t MAG_RANGE_X_LOCATION  = 16;
-static const uint8_t MAG_RANGE_Y_LOCATION  = 20;
+// Magnetometer calibration  [7–24]
+static const uint8_t MAG_VALID_LOCATION       = 7;
+static const uint8_t MAG_OFFSET_X_LOCATION    = 8;
+static const uint8_t MAG_OFFSET_Y_LOCATION    = 12;
+static const uint8_t MAG_RANGE_X_LOCATION     = 16;
+static const uint8_t MAG_RANGE_Y_LOCATION     = 20;
+static const uint8_t MAG_FIFO_SIZE_LOCATION   = 24;
 
-// Steering parameters  [24–32]
-static const uint8_t STEER_VALID_LOCATION  = 24;
-static const uint8_t KP_LOCATION           = 25;
-static const uint8_t HEADING_LOCATION      = 29;
+// Steering parameters  [25–33]
+static const uint8_t STEER_VALID_LOCATION     = 25;
+static const uint8_t KP_LOCATION              = 26;
+static const uint8_t HEADING_LOCATION         = 30;
