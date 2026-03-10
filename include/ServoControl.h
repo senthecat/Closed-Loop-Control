@@ -2,15 +2,9 @@
 #include <EEPROM.h>
 #include <Servo.h>
 #include <Interrupt.h>
+#include <EEPROMLayout.h>
 
 #define SERVO_PIN 3
-
-
-// probably move these all into one file for easier readability and less confusion
-const uint8_t VALID_LOCATION  = 0;
-const uint8_t CENTER_LOCATION = VALID_LOCATION  + sizeof(uint8_t);
-const uint8_t LEFT_LOCATION   = CENTER_LOCATION + sizeof(int16_t);
-const uint8_t RIGHT_LOCATION  = LEFT_LOCATION   + sizeof(int16_t);
 
 uint16_t heading = 1500; // default as nominal center which should be 1500
 
@@ -45,9 +39,9 @@ struct ServoControl{
         valid = (magic == 0xA5);
 
         if (!valid) {   // invalid take measurements;
-            ledSetBlink(250);
+            ledSetBlink(250);   // fast blink, need to measure
         } else {
-            ledSetOn();
+            ledSetBlink(500);   // slow blink valid, but need to confirm
         }
 
         EEPROM.get(CENTER_LOCATION, servo_center);
