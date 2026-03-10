@@ -3,6 +3,17 @@
 #include <EEPROMLayout.h>
 #include <ServoControl.h>
 #include <MagControl.h>
+#include <Nav.h>
+
+// ── Waypoints (inches from start, heading-0 = +X direction) ──────────────────
+static const WayPoint WAYPOINTS[] = {
+    {  24.0f,   0.0f },   // wp 0: 2 ft straight ahead
+    {  24.0f,  24.0f },   // wp 1: 2 ft left
+    {   0.0f,  24.0f },   // wp 2: 2 ft back toward origin
+};
+static const uint8_t NUM_WAYPOINTS = sizeof(WAYPOINTS) / sizeof(WAYPOINTS[0]);
+
+NavSystem nav;
 
 #define BTN_L            8
 #define BTN_R            9
@@ -99,6 +110,8 @@ void printStatus() {
   Serial.print(F("mag cal:      ")); Serial.println(mc.isCalibrated() ? "yes" : "no");
   Serial.print(F("mag FIFO:     ")); Serial.println(mc.getFifoSize());
   Serial.print(F("steering:     ")); Serial.println(steering ? "on" : "off");
+  Serial.print(F("nav wp:       ")); Serial.print(nav.index()); Serial.print(F("/")); Serial.println(nav.count());
+  Serial.print(F("nav pos:      ")); Serial.print(nav.posX(), 1); Serial.print(F(",")); Serial.println(nav.posY(), 1);
   Serial.print(F("target hdg:   ")); Serial.println(target_heading);
   Serial.print(F("Kp:           ")); Serial.println(Kp);
   Serial.print(F("tolerance:    ")); Serial.println(heading_tolerance);
@@ -172,6 +185,8 @@ void startFiring(unsigned long now) {
   solPulsed   = false;
   firing      = true;
   fireStart   = now;
+  nav.reset();
+  target_heading = nav.bearingToNext(mc.heading());
   Serial.println(F("Firing + steering for 7.5 s..."));
 }
 
@@ -245,6 +260,7 @@ void setup() {
 
   sc.enter();
   mc.enter();   // inits Wire, mag, loads mag cal from EEPROM
+  nav.begin(WAYPOINTS, NUM_WAYPOINTS);
 
   // Load steering params from EEPROM
   uint8_t steer_magic;
@@ -288,12 +304,16 @@ void loop() {
     if (btnR_stable == LOW) btnR_pressed = true;
   }
 
-  // Limit switch debounce (GPIO 4) — count triggers during firing test
+  // Limit switch debounce (GPIO 4) — count triggers, update dead reckoning
   reading = digitalRead(LIMIT_PIN);
   if (reading != limitRaw) { limitRaw = reading; limitDebounce = now; }
   if ((now - limitDebounce) >= LIMIT_DEBOUNCE && reading != limitStable) {
     limitStable = reading;
-    if (limitStable == LOW && (firing || steering)) limitCount++;
+    if (limitStable == LOW && (firing || steering)) {
+      limitCount++;
+      if (firing && !nav.done())
+        target_heading = nav.update(mc.heading());
+    }
   }
 
   // GPIO 8 → tare
