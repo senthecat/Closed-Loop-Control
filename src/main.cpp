@@ -12,7 +12,7 @@
 #define LIMIT_DEBOUNCE   2
 #define PULSE_MS         50
 #define FIRE_INTERVAL_MS 200
-#define FIRE_TEST_MS    1000  // observation window for single-fire test (ms)
+#define FIRE_TEST_MS   10000  // observation window for single-fire test (ms)
 
 // ── Steering tuning parameters ──
 float Kp                = 5.0;    // proportional gain
@@ -70,7 +70,7 @@ void printHelp() {
   Serial.println(F("  a      - stream heading angle (any key to stop)"));
   Serial.println(F("  t      - tare heading to zero"));
   Serial.println(F("-- Steering --"));
-  Serial.println(F("  f      - fire solenoid once, count limit switch triggers (2 s)"));
+  Serial.println(F("  f      - fire solenoid + steer for 10 s, report heading & distance"));
   Serial.println(F("  g      - start Kp steering toward target"));
   Serial.println(F("  p      - stop steering"));
   Serial.println(F("  <num>  - set new target heading (e.g. 90.5)"));
@@ -121,9 +121,6 @@ void steerUpdate() {
 
   float   output    = Kp * error;
   int16_t servo_cmd = servo_center - (int16_t)output;
-
-  Serial.print(F("  "));
-  Serial.print(servo_cmd);
 
   // clamp to calibrated limits
   if (servo_cmd < servo_left_limit && servo_left_limit < servo_center)
@@ -279,16 +276,37 @@ void loop() {
 
   // ── Single-fire test ──
   if (firing) {
-    if (now - fireStart >= PULSE_MS)      digitalWrite(SOLENOID_PIN, LOW);
-    if (now - fireStart >= FIRE_TEST_MS) {
+    // Repeated solenoid pulses
+    if (!solPulsed) {
+      digitalWrite(SOLENOID_PIN, HIGH);
+      solPulsed = true;
+      solTimer  = now;
+    }
+    if (now - solTimer >= PULSE_MS)         digitalWrite(SOLENOID_PIN, LOW);
+    if (now - solTimer >= FIRE_INTERVAL_MS) solPulsed = false;
+
+    // Steer servo toward target heading
+    steerUpdate();
+    delay(20);
+
+    bool fireTimedOut = (now - fireStart >= FIRE_TEST_MS);
+    bool fireStopped  = false;
+    if (Serial.available()) {
+      char c = Serial.read();
+      if (c == 'p') fireStopped = true;
+    }
+
+    if (fireTimedOut || fireStopped) {
       firing = false;
       digitalWrite(SOLENOID_PIN, LOW);
-      Serial.print(F("Fire complete | Limit switch triggers: "));
-      Serial.print(limitCount);
-      Serial.print("  Distance (in): ");
+      solPulsed = false;
+      servo.writeMicroseconds(servo_center);
+      Serial.print(fireStopped ? F("Fire stopped | Heading: ") : F("Fire complete | Heading: "));
+      Serial.print(mc.heading(), 1);
+      Serial.print(F(" deg | Distance (in): "));
       Serial.println((double)limitCount * 1.16);
     }
-    return;  // ignore all input during the 2-second window
+    return;
   }
 
   if (!Serial.available()) return;
@@ -353,11 +371,19 @@ void loop() {
       }
       return;
     case 'f': // single-fire test
+      if (!mc.isCalibrated()) {
+        Serial.println(F("Mag not calibrated first."));
+        return;
+      }
+      if (!valid) {
+        Serial.println(F("Servo not calibrated first."));
+        return;
+      }
       firing     = true;
       limitCount = 0;
+      solPulsed  = false;
       fireStart  = now;
-      digitalWrite(SOLENOID_PIN, HIGH);
-      Serial.println(F("Fired. Counting limit switch triggers for 1 s..."));
+      Serial.println(F("Firing + steering for 10 s..."));
       return;
     case 'g': // start steering
       if (!mc.isCalibrated()) {
