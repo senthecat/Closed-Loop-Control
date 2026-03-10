@@ -19,6 +19,10 @@ float Kp                = 5.0;    // proportional gain
 float target_heading    = 45.0;   // target heading in degrees (relative to tare)
 float heading_tolerance = 2.0;    // tolerance in degrees
 
+// ── MAE tracking ──
+float         errorSum    = 0.0f;
+unsigned long sampleCount = 0;
+
 Servo        servo;
 ServoControl sc(servo);
 MagControl   mc;
@@ -72,9 +76,12 @@ void printHelp() {
   Serial.println(F("-- Steering --"));
   Serial.println(F("  f      - fire solenoid + steer for 10 s, report heading & distance"));
   Serial.println(F("  g      - start Kp steering toward target"));
-  Serial.println(F("  p      - stop steering"));
+  Serial.println(F("  p      - stop steering (prints MAE, saves trial)"));
   Serial.println(F("  <num>  - set new target heading (e.g. 90.5)"));
   Serial.println(F("  k      - set Kp gain (then type value + enter)"));
+  Serial.println(F("-- Trial log --"));
+  Serial.println(F("  w      - dump all trials as CSV (Kp, heading, MAE)"));
+  Serial.println(F("  c      - clear trial log"));
   Serial.println(F("-- Buttons --"));
   Serial.println(F("  GPIO 8 - tare heading"));
   Serial.println(F("  GPIO 9 - toggle steering + solenoid on/off"));
@@ -98,19 +105,88 @@ void printStatus() {
   Serial.println(F("--------------"));
 }
 
+// ── Trial log ──
+
+void saveTrialToEEPROM(float mae) {
+  uint8_t count;
+  EEPROM.get(TRIAL_COUNT_LOCATION, count);
+  if (count >= MAX_TRIALS) {
+    Serial.println(F("Trial log full (82 max). Send 'c' to clear."));
+    return;
+  }
+  uint16_t addr = TRIAL_DATA_START + (uint16_t)count * TRIAL_ROW_SIZE;
+  EEPROM.put(addr,                  Kp);
+  EEPROM.put(addr + sizeof(float),  target_heading);
+  EEPROM.put(addr + 2*sizeof(float), mae);
+  count++;
+  EEPROM.put(TRIAL_COUNT_LOCATION, count);
+  Serial.print(F("Trial #")); Serial.print(count); Serial.println(F(" saved."));
+}
+
+void dumpTrials() {
+  uint8_t count;
+  EEPROM.get(TRIAL_COUNT_LOCATION, count);
+  if (count == 0 || count > MAX_TRIALS) {
+    Serial.println(F("No trials logged."));
+    return;
+  }
+  Serial.println(F("trial,Kp,heading,MAE"));
+  for (uint8_t i = 0; i < count; i++) {
+    uint16_t addr = TRIAL_DATA_START + (uint16_t)i * TRIAL_ROW_SIZE;
+    float kp_val, hd_val, mae_val;
+    EEPROM.get(addr,                  kp_val);
+    EEPROM.get(addr + sizeof(float),  hd_val);
+    EEPROM.get(addr + 2*sizeof(float), mae_val);
+    Serial.print(i + 1);   Serial.print(',');
+    Serial.print(kp_val, 4); Serial.print(',');
+    Serial.print(hd_val, 2); Serial.print(',');
+    Serial.println(mae_val, 4);
+  }
+}
+
+void clearTrials() {
+  EEPROM.put(TRIAL_COUNT_LOCATION, (uint8_t)0);
+  Serial.println(F("Trial log cleared."));
+}
+
 // ── Steering control ──
+
+void stopSteering() {
+  steering = false;
+  digitalWrite(SOLENOID_PIN, LOW);
+  solPulsed = false;
+  servo.writeMicroseconds(servo_center);
+  if (sampleCount > 0) {
+    float mae = errorSum / (float)sampleCount;
+    Serial.print(F("Steering stopped. MAE="));
+    Serial.print(mae, 4);
+    Serial.print(F(" ("));
+    Serial.print(sampleCount);
+    Serial.print(F(" samples) | Limit triggers: "));
+    Serial.print(limitCount);
+    Serial.print(F("  Distance (in): "));
+    Serial.println((double)limitCount * 1.16);
+    saveTrialToEEPROM(mae);
+  } else {
+    Serial.println(F("Steering stopped. No samples."));
+  }
+}
 
 void steerUpdate() {
   float current = mc.heading();
   float error   = target_heading - current;
 
-  Serial.print(current);
-  Serial.print(F("  "));
-  Serial.print(error);
-
   // wrap error to -180..+180
   if (error >  180.0f) error -= 360.0f;
   if (error < -180.0f) error += 360.0f;
+
+  // accumulate MAE
+  errorSum += fabs(error);
+  sampleCount++;
+
+  Serial.print(current);
+  Serial.print(F("  "));
+  Serial.print(error);
 
   // within tolerance — hold center
   if (fabs(error) <= heading_tolerance) {
@@ -165,6 +241,11 @@ void setup() {
 
   pinMode(LIMIT_PIN, INPUT_PULLUP);
 
+  // Sanitize trial count on fresh EEPROM (0xFF → 0)
+  uint8_t tc;
+  EEPROM.get(TRIAL_COUNT_LOCATION, tc);
+  if (tc > MAX_TRIALS) EEPROM.put(TRIAL_COUNT_LOCATION, (uint8_t)0);
+
   printHelp();
   printStatus();
 }
@@ -210,21 +291,16 @@ void loop() {
       } else if (!valid) {
         Serial.println(F("Servo not calibrated."));
       } else {
-        steering   = true;
-        solPulsed  = false;
-        limitCount = 0;
+        errorSum    = 0.0f;
+        sampleCount = 0;
+        limitCount  = 0;
+        solPulsed   = false;
+        steering    = true;
         Serial.print(F("Steering ON. Target="));
         Serial.println(target_heading);
       }
     } else {
-      steering = false;
-      digitalWrite(SOLENOID_PIN, LOW);
-      solPulsed = false;
-      servo.writeMicroseconds(servo_center);
-      Serial.print(F("Steering stopped. | Limit switch triggers: "));
-      Serial.print(limitCount);
-      Serial.print("  Distance (in): ");
-      Serial.println((double)limitCount * 1.16);
+      stopSteering();
     }
   }
 
@@ -260,16 +336,7 @@ void loop() {
 
     if (Serial.available()) {
       char c = Serial.read();
-      if (c == 'p') {
-        steering = false;
-        digitalWrite(SOLENOID_PIN, LOW);
-        solPulsed = false;
-        servo.writeMicroseconds(servo_center);
-        Serial.print(F("Steering stopped. | Limit switch triggers: "));
-        Serial.print(limitCount);
-        Serial.print("  Distance (in): ");
-        Serial.println((double)limitCount * 1.16);
-      }
+      if (c == 'p') stopSteering();
     }
     return;
   }
@@ -394,8 +461,11 @@ void loop() {
         Serial.println(F("Servo not calibrated first."));
         return;
       }
-      steering   = true;
-      limitCount = 0;
+      errorSum    = 0.0f;
+      sampleCount = 0;
+      limitCount  = 0;
+      solPulsed   = false;
+      steering    = true;
       Serial.print(F("Steering ON. Target="));
       Serial.print(target_heading);
       Serial.print(F(" Tol="));
@@ -421,6 +491,8 @@ void loop() {
       Serial.print(MAG_FIFO_MAX);
       Serial.println(F("). Enter new value:"));
       return;
+    case 'w': dumpTrials();  return;
+    case 'c': clearTrials(); return;
     case 'h': printHelp(); return;
     case '\n':
     case '\r': return;

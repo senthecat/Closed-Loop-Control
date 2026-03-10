@@ -21,7 +21,10 @@
 //  26       4    float    Kp gain
 //  30       4    float    Target heading (degrees)
 //
-//  Total: 34 bytes
+//  34       1    uint8_t  Trial count
+//  35+     12    3xfloat  Trial rows: Kp, heading, MAE  (max 82 trials)
+//
+//  Total: 34 + 1 + 82*12 = 1019 bytes
 // ─────────────────────────────────────────────────────────────────────────────
 
 // Servo calibration  [0–6]
@@ -42,3 +45,9 @@ static const uint8_t MAG_FIFO_SIZE_LOCATION   = 24;
 static const uint8_t STEER_VALID_LOCATION     = 25;
 static const uint8_t KP_LOCATION              = 26;
 static const uint8_t HEADING_LOCATION         = 30;
+
+// Trial log  [34–1018]
+static const uint8_t  TRIAL_COUNT_LOCATION = 34;
+static const uint8_t  TRIAL_DATA_START     = 35;
+static const uint8_t  TRIAL_ROW_SIZE       = 12;  // 3 * sizeof(float): Kp, heading, MAE
+static const uint8_t  MAX_TRIALS           = 82;  // (1024 - 35) / 12 = 82
