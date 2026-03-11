@@ -17,7 +17,7 @@
 // ── Steering tuning parameters ──
 float Kp                = 5.0;    // proportional gain
 float target_heading    = 45.0;   // target heading in degrees (relative to tare)
-float heading_tolerance = 2.0;    // tolerance in degrees
+float heading_tolerance = 0.0;    // tolerance in degrees
 
 // ── MAE tracking ──
 float         errorSum    = 0.0f;
