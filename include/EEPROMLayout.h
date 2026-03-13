@@ -22,9 +22,11 @@
 //  30       4    float    Target heading (degrees)
 //
 //  34       1    uint8_t  Trial count
-//  35+     13    float+uint8_t+float+float  Trial rows: Kp, fifo_size, heading, MAE  (max 76 trials)
+//  35+     21    Trial rows (max 47):
+//                  float Kp, uint8_t fifo_size, float heading,
+//                  float MAE, float overshoot, float SEP
 //
-//  Total: 34 + 1 + 76*13 = 1023 bytes
+//  Total: 34 + 1 + 47*21 = 1022 bytes
 // ─────────────────────────────────────────────────────────────────────────────
 
 // Servo calibration  [0–6]
@@ -49,5 +51,5 @@ static const uint8_t HEADING_LOCATION         = 30;
 // Trial log  [34–1018]
 static const uint8_t  TRIAL_COUNT_LOCATION = 34;
 static const uint8_t  TRIAL_DATA_START     = 35;
-static const uint8_t  TRIAL_ROW_SIZE       = 13;  // float Kp + uint8_t fifo_size + float heading + float MAE
-static const uint8_t  MAX_TRIALS           = 76;  // (1024 - 35) / 13 = 76
+static const uint8_t  TRIAL_ROW_SIZE       = 21;  // float Kp + uint8_t fifo + float heading + float MAE + float overshoot + float SEP
+static const uint8_t  MAX_TRIALS           = 47;  // (1024 - 35) / 21 = 47

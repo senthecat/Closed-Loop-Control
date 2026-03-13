@@ -12,7 +12,8 @@
 #define LIMIT_DEBOUNCE   2
 #define PULSE_MS         50
 #define FIRE_INTERVAL_MS 150
-#define FIRE_TEST_MS    7500  // timed trial duration (ms)
+#define FIRE_TEST_MS    10000  // timed trial duration (ms)
+#define STEADY_START_MS  7000  // SEP window starts here (last 3 s)
 
 // ── Steering tuning parameters ──
 float Kp                = 5.0;    // proportional gain
@@ -22,6 +23,12 @@ float heading_tolerance = 0.0;    // tolerance in degrees
 // ── MAE tracking ──
 float         errorSum    = 0.0f;
 unsigned long sampleCount = 0;
+
+// ── Overshoot & SEP tracking ──
+float         peakOvershoot        = 0.0f;
+bool          initialErrorPositive = true;
+bool          firstSample          = true;
+float         maxSteadyError       = 0.0f;  // max |error| during last 3 s
 
 Servo        servo;
 ServoControl sc(servo);
@@ -80,11 +87,11 @@ void printHelp() {
   Serial.println(F("  <num>  - set new target heading (e.g. 90.5)"));
   Serial.println(F("  k      - set Kp gain (then type value + enter)"));
   Serial.println(F("-- Trial log --"));
-  Serial.println(F("  w      - dump all trials as CSV (Kp, heading, MAE)"));
+  Serial.println(F("  w      - dump all trials as CSV"));
   Serial.println(F("  c      - clear trial log"));
   Serial.println(F("-- Buttons --"));
   Serial.println(F("  GPIO 8 - tare heading"));
-  Serial.println(F("  GPIO 9 - start/stop timed 5 s trial"));
+  Serial.println(F("  GPIO 9 - start/stop timed 10 s trial"));
   Serial.println(F("  h      - print this help"));
   Serial.println();
 }
@@ -107,18 +114,21 @@ void printStatus() {
 
 // ── Trial log ──
 
-void saveTrialToEEPROM(float mae) {
+void saveTrialToEEPROM(float mae, float overshoot, float sep) {
   uint8_t count;
   EEPROM.get(TRIAL_COUNT_LOCATION, count);
   if (count >= MAX_TRIALS) {
-    Serial.println(F("Trial log full (76 max). Send 'c' to clear."));
+    Serial.println(F("Trial log full (47 max). Send 'c' to clear."));
     return;
   }
   uint16_t addr = TRIAL_DATA_START + (uint16_t)count * TRIAL_ROW_SIZE;
-  EEPROM.put(addr,                             Kp);
-  EEPROM.put(addr + sizeof(float),             mc.getFifoSize());
-  EEPROM.put(addr + sizeof(float) + 1,         target_heading);
-  EEPROM.put(addr + sizeof(float) + 1 + sizeof(float), mae);
+  uint16_t off = 0;
+  EEPROM.put(addr + off, Kp);                off += sizeof(float);
+  EEPROM.put(addr + off, mc.getFifoSize());   off += 1;
+  EEPROM.put(addr + off, target_heading);     off += sizeof(float);
+  EEPROM.put(addr + off, mae);                off += sizeof(float);
+  EEPROM.put(addr + off, overshoot);          off += sizeof(float);
+  EEPROM.put(addr + off, sep);
   count++;
   EEPROM.put(TRIAL_COUNT_LOCATION, count);
   Serial.print(F("Trial #")); Serial.print(count); Serial.println(F(" saved."));
@@ -131,20 +141,25 @@ void dumpTrials() {
     Serial.println(F("No trials logged."));
     return;
   }
-  Serial.println(F("trial,Kp,fifo_size,heading,MAE"));
+  Serial.println(F("trial,Kp,fifo_size,heading,MAE,overshoot,SEP"));
   for (uint8_t i = 0; i < count; i++) {
     uint16_t addr = TRIAL_DATA_START + (uint16_t)i * TRIAL_ROW_SIZE;
-    float   kp_val, hd_val, mae_val;
+    float   kp_val, hd_val, mae_val, os_val, st_val;
     uint8_t fifo_val;
-    EEPROM.get(addr,                             kp_val);
-    EEPROM.get(addr + sizeof(float),             fifo_val);
-    EEPROM.get(addr + sizeof(float) + 1,         hd_val);
-    EEPROM.get(addr + sizeof(float) + 1 + sizeof(float), mae_val);
+    uint16_t off = 0;
+    EEPROM.get(addr + off, kp_val);   off += sizeof(float);
+    EEPROM.get(addr + off, fifo_val); off += 1;
+    EEPROM.get(addr + off, hd_val);   off += sizeof(float);
+    EEPROM.get(addr + off, mae_val);  off += sizeof(float);
+    EEPROM.get(addr + off, os_val);   off += sizeof(float);
+    EEPROM.get(addr + off, st_val);
     Serial.print(i + 1);      Serial.print(',');
     Serial.print(kp_val, 4);  Serial.print(',');
     Serial.print(fifo_val);   Serial.print(',');
     Serial.print(hd_val, 2);  Serial.print(',');
-    Serial.println(mae_val, 4);
+    Serial.print(mae_val, 4); Serial.print(',');
+    Serial.print(os_val, 2);  Serial.print(',');
+    Serial.println(st_val, 3);
   }
 }
 
@@ -155,11 +170,21 @@ void clearTrials() {
 
 // ── Steering control ──
 
+// Global so fire-test path can also use it
+float lastSEP = 0.0f;
+
 void stopSteering() {
   steering = false;
   digitalWrite(SOLENOID_PIN, LOW);
   solPulsed = false;
   servo.writeMicroseconds(servo_center);
+
+  // Compute SEP (max percent error during last 3 s)
+  if (fabs(target_heading) > 0.001f)
+    lastSEP = (maxSteadyError / fabs(target_heading)) * 100.0f;
+  else
+    lastSEP = 0.0f;
+
   if (sampleCount > 0) {
     float mae = errorSum / (float)sampleCount;
     Serial.print(F("Steering stopped. MAE="));
@@ -170,6 +195,11 @@ void stopSteering() {
     Serial.print(limitCount);
     Serial.print(F("  Distance (in): "));
     Serial.println((double)limitCount * 1.16);
+    Serial.print(F("Overshoot: "));
+    Serial.print(peakOvershoot, 2);
+    Serial.print(F(" deg | SEP: "));
+    Serial.print(lastSEP, 2);
+    Serial.println(F(" %"));
   } else {
     Serial.println(F("Steering stopped. No samples."));
   }
@@ -186,6 +216,20 @@ void steerUpdate() {
   // accumulate MAE
   errorSum += fabs(error);
   sampleCount++;
+
+  // track overshoot (error sign flip = passed target)
+  if (firstSample) {
+    initialErrorPositive = (error >= 0);
+    firstSample = false;
+  }
+  if (initialErrorPositive && error < 0)
+    peakOvershoot = max(peakOvershoot, -error);
+  else if (!initialErrorPositive && error > 0)
+    peakOvershoot = max(peakOvershoot, error);
+
+  // track max |error| during steady-state window (last 3 s)
+  if (millis() - fireStart >= STEADY_START_MS)
+    maxSteadyError = max(maxSteadyError, fabs(error));
 
   Serial.print(current);
   Serial.print(F("  "));
@@ -294,13 +338,16 @@ void loop() {
       } else if (!valid) {
         Serial.println(F("Servo not calibrated."));
       } else {
-        errorSum    = 0.0f;
-        sampleCount = 0;
-        limitCount  = 0;
-        solPulsed   = false;
-        firing      = true;
-        fireStart   = now;
-        Serial.println(F("Firing + steering for 5 s..."));
+        errorSum             = 0.0f;
+        sampleCount          = 0;
+        limitCount           = 0;
+        peakOvershoot        = 0.0f;
+        firstSample          = true;
+        maxSteadyError       = 0.0f;
+        solPulsed            = false;
+        firing               = true;
+        fireStart            = now;
+        Serial.println(F("Firing + steering for 10 s..."));
       }
     } else {
       // treat as early stop (same as 'p')
@@ -384,10 +431,11 @@ void loop() {
       Serial.print(mc.heading(), 1);
       Serial.print(F(" deg | Distance (in): "));
       Serial.println((double)limitCount * 1.16);
-      if (fireTimedOut && sampleCount > 0) {
-        saveTrialToEEPROM(errorSum / (float)sampleCount);
-      }
       stopSteering();
+      if (fireTimedOut && sampleCount > 0) {
+        saveTrialToEEPROM(errorSum / (float)sampleCount,
+                          peakOvershoot, lastSEP);
+      }
     }
     return;
   }
@@ -462,10 +510,15 @@ void loop() {
         Serial.println(F("Servo not calibrated first."));
         return;
       }
-      firing     = true;
-      limitCount = 0;
-      solPulsed  = false;
-      fireStart  = now;
+      firing               = true;
+      limitCount           = 0;
+      errorSum             = 0.0f;
+      sampleCount          = 0;
+      peakOvershoot        = 0.0f;
+      firstSample          = true;
+      maxSteadyError       = 0.0f;
+      solPulsed            = false;
+      fireStart            = now;
       Serial.println(F("Firing + steering for 10 s..."));
       return;
     case 'g': // start steering
@@ -477,11 +530,15 @@ void loop() {
         Serial.println(F("Servo not calibrated first."));
         return;
       }
-      errorSum    = 0.0f;
-      sampleCount = 0;
-      limitCount  = 0;
-      solPulsed   = false;
-      steering    = true;
+      errorSum             = 0.0f;
+      sampleCount          = 0;
+      limitCount           = 0;
+      peakOvershoot        = 0.0f;
+      firstSample          = true;
+      maxSteadyError       = 0.0f;
+      fireStart            = millis();
+      solPulsed            = false;
+      steering             = true;
       Serial.print(F("Steering ON. Target="));
       Serial.print(target_heading);
       Serial.print(F(" Tol="));
