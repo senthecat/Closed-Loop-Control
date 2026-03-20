@@ -7,9 +7,9 @@
 
 // ── Waypoints (inches from start, heading-0 = +X direction) ──────────────────
 static const WayPoint WAYPOINTS[] = {
-    {  24.0f,   0.0f },   // wp 0: 2 ft straight ahead
-    {  24.0f,  24.0f },   // wp 1: 2 ft left
-    {   0.0f,  24.0f },   // wp 2: 2 ft back toward origin
+    {  100.0f,   0.0f },   // wp 0: 2 ft straight ahead
+    {  124.0f, 33.0 },
+    {  120.0f, 1000.0f}
 };
 static const uint8_t NUM_WAYPOINTS = sizeof(WAYPOINTS) / sizeof(WAYPOINTS[0]);
 
@@ -21,9 +21,8 @@ NavSystem nav;
 #define SOLENOID_PIN     2
 #define DEBOUNCE_MS     75
 #define LIMIT_DEBOUNCE   2
-#define PULSE_MS         50
-#define FIRE_INTERVAL_MS 150
-#define FIRE_TEST_MS    7500  // timed trial duration (ms)
+#define PULSE_MS         100
+#define FIRE_INTERVAL_MS 240
 
 // ── Steering tuning parameters ──
 float Kp                = 5.0;    // proportional gain
@@ -57,9 +56,8 @@ bool          limitRaw = HIGH, limitStable = HIGH;
 unsigned long limitDebounce = 0;
 
 // Single-fire test state
-bool          firing    = false;
-unsigned long fireStart = 0;
-int           limitCount = 0;
+bool firing    = false;
+int  limitCount = 0;
 
 // Serial buffer for numeric entry
 char    serialBuf[16];
@@ -85,7 +83,7 @@ void printHelp() {
   Serial.println(F("  a      - stream heading angle (any key to stop)"));
   Serial.println(F("  t      - tare heading to zero"));
   Serial.println(F("-- Steering --"));
-  Serial.println(F("  f      - fire solenoid + steer for 10 s, report heading & distance"));
+  Serial.println(F("  f      - fire solenoid + steer (stops at final waypoint or 'p'/'f')"));
   Serial.println(F("  g      - start Kp steering toward target"));
   Serial.println(F("  p      - stop steering (prints MAE, saves trial)"));
   Serial.println(F("  <num>  - set new target heading (e.g. 90.5)"));
@@ -95,7 +93,7 @@ void printHelp() {
   Serial.println(F("  c      - clear trial log"));
   Serial.println(F("-- Buttons --"));
   Serial.println(F("  GPIO 8 - tare heading"));
-  Serial.println(F("  GPIO 9 - start/stop timed 5 s trial"));
+  Serial.println(F("  GPIO 9 - start/stop fire (stops at final waypoint)"));
   Serial.println(F("  h      - print this help"));
   Serial.println();
 }
@@ -179,28 +177,26 @@ void pulseSolenoid(unsigned long now) {
 }
 
 void startFiring(unsigned long now) {
+  (void)now;
   errorSum    = 0.0f;
   sampleCount = 0;
   limitCount  = 0;
   solPulsed   = false;
   firing      = true;
-  fireStart   = now;
   nav.reset();
   target_heading = nav.bearingToNext(mc.heading());
-  Serial.println(F("Firing + steering for 7.5 s..."));
+  Serial.println(F("Firing + steering..."));
 }
 
-void stopFiring(bool timed) {
+void stopFiring() {
   firing = false;
   digitalWrite(SOLENOID_PIN, LOW);
   solPulsed = false;
   servo.writeMicroseconds(servo_center);
-  Serial.print(timed ? F("Fire complete | Heading: ") : F("Fire stopped | Heading: "));
+  Serial.print(F("Fire stopped | Heading: "));
   Serial.print(mc.heading(), 1);
   Serial.print(F(" deg | Distance (in): "));
   Serial.println((double)limitCount * 1.16);
-  if (timed && sampleCount > 0)
-    saveTrialToEEPROM(errorSum / (float)sampleCount);
 }
 
 void steerUpdate() {
@@ -319,14 +315,14 @@ void loop() {
   // GPIO 8 → tare
   if (btnL_pressed) mc.tare();
 
-  // GPIO 9 → start timed trial (or stop early if already firing)
+  // GPIO 9 → toggle fire
   if (btnR_pressed) {
     if (!firing) {
       if (!mc.isCalibrated()) Serial.println(F("Mag not calibrated."));
       else if (!valid)         Serial.println(F("Servo not calibrated."));
       else                     startFiring(now);
     } else {
-      stopFiring(false);
+      stopFiring();
     }
   }
 
@@ -351,7 +347,6 @@ void loop() {
   if (steering) {
     pulseSolenoid(now);
     steerUpdate();
-    delay(20);
 
     if (Serial.available() && Serial.read() == 'p') {
       steering = false;
@@ -363,15 +358,16 @@ void loop() {
     return;
   }
 
-  // ── Timed firing trial ──
+  // ── Firing loop ──
   if (firing) {
     pulseSolenoid(now);
     steerUpdate();
-    delay(20);
 
-    bool timed   = (now - fireStart >= FIRE_TEST_MS);
-    bool stopped = Serial.available() && Serial.read() == 'p';
-    if (timed || stopped) stopFiring(timed);
+    if (nav.done()) { stopFiring(); return; }
+    if (Serial.available()) {
+      char ch = Serial.read();
+      if (ch == 'p' || ch == 'f') stopFiring();
+    }
     return;
   }
 
@@ -437,6 +433,7 @@ void loop() {
       }
       return;
     case 'f':
+      if (firing) { stopFiring(); return; }
       if (!mc.isCalibrated()) { Serial.println(F("Mag not calibrated first.")); return; }
       if (!valid)             { Serial.println(F("Servo not calibrated first.")); return; }
       startFiring(now);

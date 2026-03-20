@@ -5,7 +5,7 @@
 // Inches traveled per limit switch trigger
 #define NAV_DIST_PER_TICK  1.16f
 // Arrival radius in inches (1 circular foot)
-#define NAV_ARRIVAL_IN    12.0f
+#define NAV_ARRIVAL_IN    14.0f
 
 // ── WayPoint ──────────────────────────────────────────────────────────────────
 // X/Y position in inches relative to the robot's starting location.
